@@ -29,7 +29,7 @@ def reward_probabilities(env_size):
 def check_feasibility(s_prime, s, env_size, obstacles):
     if s_prime[0]<0 or s_prime[1]<0 or s_prime[0]>=env_size or s_prime[1]>=env_size:
         return s
-    if obstacles[s_prime[0],s_prime[1]] == 0:
+    if obstacles[s_prime[0],s_prime[1]] == 1:
         return s
     return s_prime
 
@@ -49,7 +49,6 @@ def transition_probabilities(env, s, a, env_size, directions, obstacles):
     prob_next_state[s_prime[0], s_prime[1]] = 1/3 
 
     s_prime = check_feasibility(s + [-directions[a][0],directions[a][0]], s, env_size, obstacles)
-    print(s,s_prime)
     prob_next_state[s_prime[0], s_prime[1]] = 1/3 
 
     return prob_next_state
