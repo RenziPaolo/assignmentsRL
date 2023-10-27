@@ -15,7 +15,9 @@ def main():
     render = args.render
     ilqr = ILqr(pendulum_dyn, cost, horizon=20)
 
-    env = gym.make("Pendulum-v1", render_mode="human" if render else "rgb_array")
+    #env = gym.make("Pendulum-v1", render_mode="human" if render else "rgb_array")
+
+    env = gym.make("Pendulum-v1", render_mode="human")
 
     rewards = []
     for i in range(args.episodes):

@@ -43,11 +43,11 @@ class ILqr:
 
             # TODO
             kt = -linalg.inv(Rt + Bt.T@Pt1@Bt ) @ (rt + Bt.T@pt1)
-            Kt = -linalg.inv(Rt+Bt.T@Pt@Bt)@Bt.T@Pt@At
-        
+            Kt = -linalg.inv(Rt + Bt.T@Pt1@Bt ) @ Bt.T @ Pt1 @ At
+
             # TODO
-            pt = qt + Kt.T (Rt@kt + rt) + (At + Bt@Kt).T@pt + (At + Bt@Kt).T  
-            Pt = (Qt + Kt.T@Rt@Kt + (At+Bt@Kt).T@Pt@(At+Bt@Kt))
+            pt = qt + Kt.T @(Rt@kt + rt) + (At + Bt@Kt).T@pt1 + (At + Bt@Kt).T @Pt1@Bt@kt  
+            Pt = (Qt + Kt.T@Rt@Kt + (At+Bt@Kt).T@Pt1@(At+Bt@Kt))
 
             pt1 = pt
             Pt1 = Pt
@@ -67,8 +67,8 @@ class ILqr:
         
         for t in range(len(u_seq)):
             # TODO
-            control = k_seq[t] + K_seq[t]*(x_seq_hat[t] - x_seq[t])
-            
+            control = k_seq[t] + K_seq[t]@(x_seq_hat[t] - x_seq[t])
+            #print("\n\n\nk_seq",k_seq,"\n K_seq:",K_seq,"\n x_seq_hat:", x_seq_hat, "\n x_seq:", x_seq )
             # clip controls to the actual range from gymnasium
             u_seq_hat[t] = np.clip(u_seq[t] + control,-2,2)
             x_seq_hat[t+1] = self.f(x_seq_hat[t], u_seq_hat[t])
@@ -95,7 +95,7 @@ def pendulum_dyn(x,u):
     u = np.clip(u, -2, 2)[0]
 
     # TODO
-    newthdot = th + (( (3*g) / (2*l) )*np.sin(th) + ( 3.0/(m*l) )*u )*dt
+    newthdot = thdot + (( (3*g) / (2*l) )*np.sin(th) + ( 3.0/(m*l*l) )*u )*dt
     newth = th + newthdot*dt
     
     newthdot = np.clip(newthdot, -8, 8)
