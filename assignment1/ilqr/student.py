@@ -1,6 +1,6 @@
 from autograd import grad, jacobian
 import autograd.numpy as np
-
+from autograd.numpy import linalg
 
 class ILqr:
     
@@ -42,11 +42,12 @@ class ILqr:
             Rt = self.getR(xt,ut)
 
             # TODO
-            kt = ...
-            Kt = ...
+            kt = -linalg.inv(Rt + Bt.T@Pt1@Bt ) @ (rt + Bt.T@pt1)
+            Kt = -linalg.inv(Rt+Bt.T@Pt@Bt)@Bt.T@Pt@At
+        
             # TODO
-            pt = ...
-            Pt = ...
+            pt = qt + Kt.T (Rt@kt + rt) + (At + Bt@Kt).T@pt + (At + Bt@Kt).T  
+            Pt = (Qt + Kt.T@Rt@Kt + (At+Bt@Kt).T@Pt@(At+Bt@Kt))
 
             pt1 = pt
             Pt1 = Pt
@@ -66,7 +67,7 @@ class ILqr:
         
         for t in range(len(u_seq)):
             # TODO
-            control = ...
+            control = k_seq[t] + K_seq[t]*(x_seq_hat[t] - x_seq[t])
             
             # clip controls to the actual range from gymnasium
             u_seq_hat[t] = np.clip(u_seq[t] + control,-2,2)
@@ -94,8 +95,8 @@ def pendulum_dyn(x,u):
     u = np.clip(u, -2, 2)[0]
 
     # TODO
-    newthdot = ...
-    newth = ...
+    newthdot = th + (( (3*g) / (2*l) )*np.sin(th) + ( 3.0/(m*l) )*u )*dt
+    newth = th + newthdot*dt
     
     newthdot = np.clip(newthdot, -8, 8)
 
