@@ -7,6 +7,7 @@
 \usepackage{caption}
 \usepackage{subcaption}
 \usepackage{hyperref}
+\usepackage{systeme}
 \hypersetup{
     colorlinks,
     citecolor=black,
@@ -25,7 +26,7 @@
         \Large Author:
         \textbf{Paolo Renzi}\\
         \vspace{0.5cm}
-        %\Large Contributors: \textbf{}%add contributors here
+        %\Contributors: \textbf{Leonardo Colosi, Francesco Bruno Nocera}%add contributors here
         \vfill
         \includegraphics[width=0.7\textwidth]{images/sapienza_logo.png}
         \vfill
@@ -38,16 +39,68 @@
 
 \section*{Theory}
 \subsection*{Problem 1}
+we can derive how many steps are needed from this equation:
+\begin{equation}  {2\gamma^i}/{(1-\gamma)}||Q0-Q*|| \leq \epsilon \end{equation}
+because $ {2\gamma^i}/{(1-\gamma)}||Q0-Q*|| $ is the distance between $ v^{\pi i}(s) $ and $v^*(s) $. \newline
+\newline
+First of all we know both $Q0$ and $Q* \in [0, 1/(1-\gamma)]$ By the infinity norm, the maximum value is $ 1/(1-\gamma) $. 
+\begin{equation}
+{2\gamma^i}/{(1-\gamma)^2} \leq \epsilon
+\end{equation}
+Then we add and subtract 1 
+\begin{equation}
+    {2 (1 - (1 - \gamma))^i}/{(1-\gamma)^2} \leq \epsilon
+\end{equation}
+Then we substitute $ - (1 - \gamma) $ with $e^- (1 - \gamma)^2 $ because it makes solving it easier even if it makes the approsimation less accurate
+\begin{equation}
+    {2e^{-(1 - \gamma )i}}/{(1-\gamma)^2} \leq \epsilon
+\end{equation}
+Then we divide by 2 and multiply by $ {(1-\gamma)^2} $ and get 
+\begin{equation}
+e^{-(1 - \gamma )i} \leq  {(1-\gamma)^2}/2
+\end{equation}
+Then we take the log of both sides 
+\begin{equation}
+    -i(1 - \gamma ) \leq  -\log({2/(\epsilon(1-\gamma)^2))}
+\end{equation}
+In the end we divide by $ -(1 - \gamma ) $ (so changing also the $\leq$ in $\geq$)
+\begin{equation}
+    i \geq  \log({2/(\epsilon(1-\gamma)^2))}/(1 - \gamma ) 
+\end{equation}
 
 \newpage
 \subsection*{Problem 2}
+MDP \newline
+S1, ..., S7
+r(S,a)\begin{equation}
+    \systeme{
+      1/2 S = S_{1}
+      5 S = S_{7}
+      0 otherwhise
+    }
+\end{equation}
+\newline
+P(S_{6}|S_{6},a_{1}) = 0.3
+P(S_{7}|S_{6},a_{1}) = 0.7
+\newline
+\pi(s) = a_{1} \forall s
+v^1 = [0.5, 0, 0, 0, 0, 0, 5]
+\gamma = 0.9
 
+We calculate the discounted reward from S_{6} and add it to the current reward of s_{6} to get the value of s_{6}
+V(S_{6}) = r(S_{6}) + \gamma \EX(V(S')) = \newline
+= 0 + 0.9 (\mathbb{P}(S_{6}|S{6,a_{1}}) V(S_{6}) + \mathbb{P}(S_{7}|S{6,a_{1}}) V(S_{7}) ) = 0.9(0.3 *0 + 0.7 * 5 ) = 0.9 * 3.5 = 3.15 
 \newpage
 \section*{Code}
 
 \subsection*{Policy iteration}
-
+To implement the reward function I used an if to check if i was in the goal state and return 1 and an else to return 0 in all other cases
+\newline
+To check if the transition was feasibile I used a couple of ifs, one to check if it was trying to go out of the grid and the second to check if it's going against an obstacle 
+\newline
+To return the transition probability i first checked if the transition was feasibile and then I assigned 1/3 to each transition (if the transition isn't feasibile with the action it would would just remain the state it was)
 \newpage
 \subsection*{iLQR}
+for iLQR i just implemented the formulas being careful about which operator i was using between * and @.
 
 \end{document}
