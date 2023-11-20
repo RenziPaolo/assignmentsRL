@@ -60,8 +60,16 @@ class TDLambda_LVFA:
     def update_transition(self, s, action, s_prime, reward, done): # modify
         s_feats = self.feature_encoder.encode(s)
         s_prime_feats = self.feature_encoder.encode(s_prime)
+
+        for s_ in self.env.observation_space:
+            if(s_ == s):
+                self.traces[s_] += self.lambda_*self.gamma*self.traces[s_] + 1
+            else:
+                self.traces[s_] *= self.lambda_*self.gamma*self.traces[s_] 
+
         # TODO update the weights
-        self.weights[action] += ...
+        
+        self.weights[action] += reward + self.gamma * self.Q[s_prime,action] - self.Q[s,action]
         
     def update_alpha_epsilon(self): # do not touch
         self.epsilon = max(self.final_epsilon, self.epsilon*self.epsilon_decay)
