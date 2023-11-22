@@ -25,16 +25,16 @@ class VanillaFeatureEncoder:
 class RBFFeatureEncoder:
     def __init__(self, env): # modify
         self.env = env
-        self.featureN = 9
+        self.featureN = 20
 
 
-        self.sklearn = sklearn.kernel_approximation.RBFSampler(n_components = self.featureN)
+        self.sklearn = RBFSampler(n_components = self.featureN)
 
         # TODO init rbf encoder
         
         self.gridN = 1
-        randomness = 100
-        self.sigmasq = 0.25
+        randomness = 1
+        self.sigmasq = 0.5
         highv = env.observation_space.high[0]
         lowv = env.observation_space.low[0]
         highposition = env.observation_space.high[1]
@@ -45,6 +45,7 @@ class RBFFeatureEncoder:
             randomx = random.random()/randomness
             randomy = random.random()/randomness
             centers = np.linspace((lowv + randomx, highv + randomy), (lowposition + randomx, highposition + randomy), num = self.featureN )
+            #centers = np.linspace((lowv , highv), (lowposition, highposition), num = self.featureN )
             self.grid.append(centers)
 
     def encode(self, state): # modify
@@ -52,8 +53,8 @@ class RBFFeatureEncoder:
         feature = 0
         for grid in self.grid:
             feature += np.exp([( - (np.linalg.norm( state - center ))**2 / (2 * self.sigmasq) ) for center in grid ])
-        #return feature
-        return self.sklearn.fit(state)
+        return feature
+        #return self.sklearn.fit(state)
 
     @property
     def size(self): # modify
@@ -84,11 +85,11 @@ class TDLambda_LVFA:
         s_feats = self.feature_encoder.encode(s)
         s_prime_feats = self.feature_encoder.encode(s_prime)
         
-        delta = reward + self.gamma * self.Q(s_prime_feats).max() - self.Q(s_feats)[action]
+        delta = reward + (self.gamma * self.Q(s_prime_feats).max()) - self.Q(s_feats)[action]
         self.traces[action] += s_feats
         
         # TODO update the weights
-        self.weights[action] += - ( self.alpha * delta * self.traces[action] )
+        self.weights[action] += self.alpha * delta * self.traces[action] 
         self.traces *= self.lambda_ * self.gamma 
         
     def update_alpha_epsilon(self): # do not touch
