@@ -25,13 +25,37 @@ class VanillaFeatureEncoder:
 class RBFFeatureEncoder:
     def __init__(self, env): # modify
         self.env = env
-        self.featureN = 20
+        '''
+        observation_examples = np.array([env.observation_space.sample() for x in range(10000)])
+        self.rbf_encoder = RBFSampler(gamma=0.999)
+
+        # Scale features to [0, 1] because RBF assume that 
+        # all features are centered around 0 and have variance in the same order
+        self.scaler = sklearn.preprocessing.StandardScaler()
+
+        # Fit the scaler 
+        self.scaler.fit(observation_examples) 
+        transformed_observation_examples = self.scaler.transform(observation_examples)
+
+        self.rbf_encoder.fit(observation_examples )
 
 
-        self.sklearn = RBFSampler(n_components = self.featureN)
+        '''
+        self.featureN = 100
+        self.n_samples = 10000
+        self.scaler = sklearn.preprocessing.StandardScaler()
+        self.gamma = 0.9999
+
+        self.sklearn = RBFSampler(gamma = self.gamma, n_components = self.featureN, random_state=1)
+
+        # Sampling a sequence of states to initialize rbf
+        sampled_states = np.array([env.observation_space.sample() for _ in range(self.n_samples)])
+        self.scaler.fit(sampled_states)
+        self.sklearn.fit(self.scaler.transform(sampled_states))
 
         # TODO init rbf encoder
         
+        '''
         self.gridN = 1
         randomness = 1
         self.sigmasq = 0.5
@@ -47,19 +71,29 @@ class RBFFeatureEncoder:
             centers = np.linspace((lowv + randomx, highv + randomy), (lowposition + randomx, highposition + randomy), num = self.featureN )
             #centers = np.linspace((lowv , highv), (lowposition, highposition), num = self.featureN )
             self.grid.append(centers)
-
+        '''
     def encode(self, state): # modify
         # TODO use the rbf encoder to return the features
+        '''
         feature = 0
         for grid in self.grid:
             feature += np.exp([( - (np.linalg.norm( state - center ))**2 / (2 * self.sigmasq) ) for center in grid ])
         return feature
-        #return self.sklearn.fit(state)
+        '''
+        
+        scaled_state = self.scaler.transform([state])
+        features = self.sklearn.transform(scaled_state)
+        return features.flatten()
+        '''
+        #transformed_state = self.scaler.transform([state])
+
+        return self.rbf_encoder.transform([state]).flatten()
+        '''
 
     @property
     def size(self): # modify
         # TODO return the number of features
-        return self.featureN 
+        return 100
 
 class TDLambda_LVFA:
     def __init__(self, env, feature_encoder_cls=RBFFeatureEncoder, alpha=0.01, alpha_decay=1, 
@@ -85,12 +119,20 @@ class TDLambda_LVFA:
         s_feats = self.feature_encoder.encode(s)
         s_prime_feats = self.feature_encoder.encode(s_prime)
         
-        delta = reward + (self.gamma * self.Q(s_prime_feats).max()) - self.Q(s_feats)[action]
+        delta = reward + self.gamma * np.max(self.Q(s_prime_feats)) - self.Q(s_feats)[action]
+        
+        self.traces *= self.lambda_ * self.gamma 
         self.traces[action] += s_feats
         
+        #self.traces[action] = self.gamma*self.lambda_*self.traces[action] + s_feats
+
         # TODO update the weights
-        self.weights[action] += self.alpha * delta * self.traces[action] 
-        self.traces *= self.lambda_ * self.gamma 
+        self.weights[action] += self.alpha * delta * self.traces[action]
+
+        #self.traces[action] = self.gamma*self.lambda_*self.traces[action]
+        #self.traces *= self.lambda_ * self.gamma 
+
+        if done: self.traces = np.zeros(self.shape)
         
     def update_alpha_epsilon(self): # do not touch
         self.epsilon = max(self.final_epsilon, self.epsilon*self.epsilon_decay)
