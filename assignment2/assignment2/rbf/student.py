@@ -121,7 +121,7 @@ class TDLambda_LVFA:
         
         delta = reward + self.gamma * np.max(self.Q(s_prime_feats)) - self.Q(s_feats)[action]
         
-        self.traces *= self.lambda_ * self.gamma 
+        #self.traces *= self.lambda_ * self.gamma 
         self.traces[action] += s_feats
         
         #self.traces[action] = self.gamma*self.lambda_*self.traces[action] + s_feats
@@ -130,7 +130,7 @@ class TDLambda_LVFA:
         self.weights[action] += self.alpha * delta * self.traces[action]
 
         #self.traces[action] = self.gamma*self.lambda_*self.traces[action]
-        #self.traces *= self.lambda_ * self.gamma 
+        self.traces *= self.lambda_ * self.gamma 
 
         if done: self.traces = np.zeros(self.shape)
         
