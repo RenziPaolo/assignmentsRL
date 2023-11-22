@@ -88,8 +88,7 @@ class TDLambda_LVFA:
         self.traces[action] += s_feats
         
         # TODO update the weights
-        self.weights[action] += - ( self.alpha * delta * self.traces[action] )
-        self.traces *= self.lambda_ * self.gamma 
+        self.weights[action] += ...
         
     def update_alpha_epsilon(self): # do not touch
         self.epsilon = max(self.final_epsilon, self.epsilon*self.epsilon_decay)
