@@ -1,0 +1,7 @@
+PWD c:/Users/User/Downloads/informatica/magistrale/RL/assignment/assignment2
+INPUT c:/texlive/2023/texmf.cnf
+INPUT c:/texlive/2023/texmf-dist/web2c/texmf.cnf
+INPUT c:/texlive/2023/texmf-var/web2c/pdftex/pdflatex.fmt
+INPUT c:/Users/User/Downloads/informatica/magistrale/RL/assignment/assignment2/1887793.tex
+OUTPUT 1887793.log
+INPUT c:/texlive/2023/texmf-dist/tex/latex/base/article.cls
