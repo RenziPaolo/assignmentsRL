@@ -46,11 +46,14 @@ def sarsa_lambda(env, alpha=0.2, gamma=0.99, lambda_= 0.9, initial_epsilon=1.0, 
             next_action = epsilon_greedy_action(env, Q, next_state, epsilon)
 
             # TODO update q table and eligibility
+            
+            delta = reward + (gamma * Q[next_state, next_action]) - Q[state, action]
+            E[state, action] += 1
 
-            Q[state, action] = E[state, action] + alpha * (reward + gamma * (Q[next_state, next_action] - Q[state, action]))
-            #for s in range(0,env.observation_space):
-            E[state] += 1
-            E[state] *= lambda_*gamma
+            Q += alpha * delta * E           
+            E *= lambda_*gamma
+
+            if done: E = np.zeros((env.observation_space.n, env.action_space.n))
 
             if not received_first_reward and reward > 0:
                 received_first_reward = True
