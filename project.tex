@@ -10,6 +10,8 @@
 \usepackage{systeme}
 \usepackage{mathbbol}
 \usepackage{mathtools}
+\usepackage{biblatex}
+\addbibresource{project.bib}
 \hypersetup{
     colorlinks,
     citecolor=black,
@@ -23,7 +25,7 @@
 \begin{titlepage}
     \begin{center}
         \vspace*{1cm}
-        \Huge\textbf{Assignment 1}\\
+        \Huge\textbf{Project Proposal}\\
         \vspace{1.5cm}
         \Large Author:
         \textbf{Paolo Renzi}\\
@@ -38,7 +40,11 @@
     \end{center}
 \end{titlepage}
 \newpage
+I will apply MuZero \cite{Schrittwieser_2020} to the game of StarCraft II, thanks to the environment PySC2\cite{vinyals2017starcraft}, starting from it's minigames, to the full game and compare it to AlphaStar \cite{Arulkumaran_2019}, Deepmind's agent. 
+I will also try to use a different reward function then the one given by the environment, by scaling the ternary reward and summing it to a scaled version of "Blizzard score" by the time since the beginning of the game 
 
+\vspace{300pt}
 
+\printbibliography
 
 \end{document}
