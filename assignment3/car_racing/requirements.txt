@@ -2,5 +2,5 @@ numpy
 scipy
 gymnasium
 gymnasium[box2d]
-sklearn
+scikit-learn
 torch
