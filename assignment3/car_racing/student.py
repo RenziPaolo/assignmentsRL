@@ -10,17 +10,34 @@ class Policy(nn.Module):
     def __init__(self, device=torch.device('cpu')):
         super(Policy, self).__init__()
         self.device = device
+        #TODO 
+        #self.VAE
+        #self.MDN-RNN
+        #self.C
 
     def forward(self, x):
         # TODO
+        #z, _ = V(x)
+        #h = MDN-RNN(z, a, h)
+        #a = C(z,h)
+
         return x
     
     def act(self, state):
         # TODO
+        #z,_ = V(state)
+        #h = MDN-RNN(z, a, h)
+        #a = C(z,h)
+
         return 
 
     def train(self):
         # TODO
+        #VAE.train()
+        #MDN-RNN.train()
+        #CMA-ES(C)
+
+
         return
 
     def save(self):
