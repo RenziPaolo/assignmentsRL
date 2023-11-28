@@ -35,7 +35,7 @@ class Policy(nn.Module):
         # TODO
         #VAE.train()
         #MDN-RNN.train()
-        #CMA-ES(C)
+        #CMA-ES(C).train
 
 
         return
