@@ -11,7 +11,7 @@ import math
 class Policy(nn.Module):
     continuous = True # you can change this
 
-    def __init__(self, device=torch.device('cpu')):
+    def __init__(self, device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')):
         super(Policy, self).__init__()
         self.device = device
 
@@ -20,12 +20,13 @@ class Policy(nn.Module):
         #TODO 
         latent_dim = 100
         hidden_size = 5
-        self.VAE = VAE(in_channels = 2, latent_dim = latent_dim, hidden_dims = None)
-        self.MDN_RNN = MDN_RNN(input_size = 100+3+10, hidden_size = hidden_size, num_layers = 1, dropout = 0.1)
+        self.VAE = VAE(latent_size = latent_dim)
+        self.MDN_RNN = MDN_RNN(input_size = latent_dim+3+10, hidden_size = hidden_size, num_layers = 1, dropout = 0.1)
         self.C = nn.Linear(latent_dim + hidden_size, 3 )
 
     def forward(self, x):
         # TODO
+        print(x.shape)
         z = self.VAE.encode(x[2:4])      
         a = self.C(z, self.MDN_RNN.getHiddenState())
         a = torch.clip(a, min = -1, max = 1 )
@@ -45,11 +46,22 @@ class Policy(nn.Module):
         # TODO
         #first initialization / skip if load from file
         rollout = []
-        for _ in range(1):
+        rolloutA = []
+        rolloutH = []
+        num_rolloutVAE = 32*1
+        h = self.MDN_RNN.getHiddenState()
+        for _ in range(num_rolloutVAE):
            a = self.env.action_space.sample()
            observation, reward, terminated, truncated, info = self.env.step(a)
-           rollout.append(observation[2:4])
+           observation = torch.from_numpy(observation)
+           rollout.append(observation)
+           rolloutA.append(a)
+           rolloutH.append(h)
         
+        rollout = torch.stack(rollout, dim=0)
+        print(f'SHAPE -->{rollout.shape}')
+        rollout = rollout.permute(0,1,3,2).permute(0,2,1,3)
+        print(f'SHAPE -->{rollout.shape}')
 
         optimizerVAE = torch.optim.Adam(self.VAE.parameters(), lr=0.01)
         batch_sizeVAE = 32
@@ -57,38 +69,14 @@ class Policy(nn.Module):
 
         self.trainmodule(self.VAE, optimizerVAE, rollout, batch_sizeVAE, num_epochsVAE)
 
-        
-        # for epoch in range(num_epochsVAE):
-        #     for i in range(0, len(rollout), batch_sizeVAE):
-        #         # Get batch
-        #         X_batch = rollout[i:i+batch_sizeVAE]
-        #         y_batch = rollout[i:i+batch_sizeVAE]
+        mu, logvar = self.VAE.encode(rollout.float())
+        rolloutZ = self.VAE.latent(mu, logvar)
 
-
-        #     # Forward pass
-        #     outputs = self.VAE(X_batch)
-        #     loss = network.loss_function(outputs, y_batch)
-
-        #     # Backward pass and optimization
-        #     optimizer.zero_grad()
-        #     loss.backward()
-        #     optimizer.step()
-
-        #     # Print the loss every 100 epochs
-        #     if (epoch + 1) % 100 == 0:
-        #         print(f'RNN: Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.4f}')
-
-        rolloutZ = []
-        for _ in range(10000):
-           z = self.VAE.encode(rollout[2:4])
-           observation = self.VAE.encode(z)
-           rolloutZ.append(observation)
-
-        optimizerRNN = torch.optim.Adam(self.RNN.parameters(), lr=0.01)
+        optimizerRNN = torch.optim.Adam(self.MDN_RNN.parameters(), lr=0.01)
         batch_sizeRNN = 32
         num_epochsRNN = 100
 
-        self.trainmodule(self.MDN_RNN, optimizerRNN, rollout, batch_sizeRNN, num_epochsRNN)
+        self.trainmodule(self.MDN_RNN, optimizerRNN, rolloutZ, batch_sizeRNN, num_epochsRNN)
 
  
         #MDN_RNN.train()
@@ -150,197 +138,125 @@ class Policy(nn.Module):
         ret.device = device
         return ret
 
-    def trainmodule(network, modules, optimizer, data, batch_size,  num_epochs):
-        print(network)
+    def trainmodule(self, network, optimizer, data, batch_size,  num_epochs):
         for epoch in range(num_epochs):
             for i in range(0, len(data), batch_size):
                 # Get batch
-                X_batch = torch.tensor(data[i:i+batch_size], dtype=torch.float)
-                y_batch = torch.tensor(data[i:i+batch_size], dtype=torch.float)
+                X_batch = torch.tensor(np.array(data[i:i+batch_size]), dtype=torch.float)
+                y_batch = torch.tensor(np.array(data[i:i+batch_size]), dtype=torch.float)
 
 
-            # Forward pass
-            outputs = network.forward(X_batch)
-            loss = network.loss_function(outputs, y_batch)
+                # Forward pass
+                outputs, mu, logvar = network.forward(X_batch)
+                loss = network.loss_function(outputs, y_batch, mu, logvar)
 
-            # Backward pass and optimization
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+                # Backward pass and optimization
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
 
-            # Print the loss every 100 epochs
-            if (epoch + 1) % 100 == 0:
-                print(f'RNN: Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.4f}')
+            # Print the loss every 10 epochs
+            if (epoch + 1) % 10 == 0:
+                print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.4f}')
         return
 
 class VAE(nn.Module):
-    #Variational Auto Encoder Class
     
+    def __init__(self, latent_size):
+        super().__init__()
+        self.latent_size = latent_size
+        self.device = None
+        
+        # encoder
+        self.conv1 = nn.Conv2d(in_channels=3, out_channels=16, kernel_size=3, stride=2, padding=1)
+        self.conv2 = nn.Conv2d(in_channels=16, out_channels=32, kernel_size=3, stride=2, padding=1)
+        self.conv3 = nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3, stride=2, padding=1)
+        self.adaptive_pool = nn.AdaptiveAvgPool2d((4, 4))
+        
+        # z
+        self.mu = nn.Linear(1024, latent_size)
+        self.logvar = nn.Linear(1024, latent_size)
+        
+        # decoder
+        # Assuming the input vector is 1024 elements
+        self.fc = nn.Linear(100, 6 * 6 * 256)  # Convert 1024 elements back to 4x4x64 tensor
 
-    def __init__(self,
-                 in_channels: int,
-                 latent_dim: int,
-                 hidden_dims: List = None,
-                 **kwargs) -> None:
-        super(VAE, self).__init__()
+        # Transposed convolutions
 
-        self.latent_dim = latent_dim
+        self.dec_conv1 = nn.ConvTranspose2d(256, 128, kernel_size=3, stride=2, padding=1, output_padding=1)
+        self.dec_conv2 = nn.ConvTranspose2d(128, 64, kernel_size=3, stride=2, padding=1, output_padding=1)
+        self.dec_conv3 = nn.ConvTranspose2d(64, 32, kernel_size=3, stride=2, padding=1, output_padding=1)
+        self.dec_conv4 = nn.ConvTranspose2d(32, 3, kernel_size=3, stride=2, padding=1, output_padding=1)
+        
+    def forward(self, x):
+        mu, logvar = self.encode(x)
+        z = self.latent(mu, logvar)
+        out = self.decode(z)
+        
+        return out, mu, logvar   
+        
+    def encode(self, x):
+        batch_size = x.shape[0]
+        
+        out = F.relu(self.conv1(x))
+        out = F.relu(self.conv2(out))
+        out = F.relu(self.conv3(out))
+        out = F.relu(self.adaptive_pool(out))
+        out = out.reshape(batch_size,1024)
+        
+        mu = self.mu(out)
+        logvar = self.logvar(out)
+        
+        return mu, logvar
+        
+    def decode(self, z):
+        batch_size = z.shape[0]
+        
+        #print(z.shape)
+        out = self.fc(z)
+        out = out.view(-1, 256, 6, 6)
+        # out = out.view(-1, 64, 4, 4)  # Reshape to 4x4x64 tensor
 
-        modules = []
-        if hidden_dims is None:
-            hidden_dims = [32, 64, 128, 256, 512]
+        # out = z.view(batch_size, self.latent_size, 1, 1)
+        #print(out.shape)
 
-        # Build Encoder
-        for h_dim in hidden_dims:
-            modules.append(
-                nn.Sequential(
-                    nn.Conv2d(in_channels, out_channels=h_dim,
-                              kernel_size= 3, stride= 2, padding  = 1),
-                    nn.BatchNorm2d(h_dim),
-                    nn.LeakyReLU())
-            )
-            in_channels = h_dim
+        out = F.relu(self.dec_conv1(out))
+        out = F.relu(self.dec_conv2(out))
+        out = torch.sigmoid(self.dec_conv3(out))
+        out = torch.sigmoid(self.dec_conv4(out))
+        
+        return out
+        
+        
+    def latent(self, mu, logvar):
+        sigma = torch.exp(0.5*logvar)
+        eps = torch.randn_like(logvar).to(self.device)
+        z = mu + eps*sigma
+        
+        return z
+    
+    def obs_to_z(self, x):
+        mu, logvar = self.encode(x)
+        z = self.latent(mu, logvar)
+        
+        return z
 
-        self.encoder = nn.Sequential(*modules)
-        self.fc_mu = nn.Linear(hidden_dims[-1]*4, latent_dim)
-        self.fc_var = nn.Linear(hidden_dims[-1]*4, latent_dim)
+    def sample(self, z):
+        out = self.decode(z)
+        
+        return out
+    
+    def loss_function(self, out, y, mu, logvar):
+        #BCE = F.binary_cross_entropy(out, y, reduction="sum")
+        KL = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+        return KL
 
+    def get_latent_size(self):
+        
+        return self.latent_size
 
-        # Build Decoder
-        modules = []
-
-        self.decoder_input = nn.Linear(latent_dim, hidden_dims[-1] * 4)
-
-        hidden_dims.reverse()
-
-        for i in range(len(hidden_dims) - 1):
-            modules.append(
-                nn.Sequential(
-                    nn.ConvTranspose2d(hidden_dims[i],
-                                       hidden_dims[i + 1],
-                                       kernel_size=3,
-                                       stride = 2,
-                                       padding=1,
-                                       output_padding=1),
-                    nn.BatchNorm2d(hidden_dims[i + 1]),
-                    nn.LeakyReLU())
-            )
-
-
-
-        self.decoder = nn.Sequential(*modules)
-
-        self.final_layer = nn.Sequential(
-                            nn.ConvTranspose2d(hidden_dims[-1],
-                                               hidden_dims[-1],
-                                               kernel_size=3,
-                                               stride=2,
-                                               padding=1,
-                                               output_padding=1),
-                            nn.BatchNorm2d(hidden_dims[-1]),
-                            nn.LeakyReLU(),
-                            nn.Conv2d(hidden_dims[-1], out_channels= 3,
-                                      kernel_size= 3, padding= 1),
-                            nn.Tanh())
-
-    def encode(self, input: Tensor) -> List[Tensor]:
-        """
-        Encodes the input by passing through the encoder network
-        and returns the latent codes.
-        :param input: (Tensor) Input tensor to encoder [N x C x H x W]
-        :return: (Tensor) List of latent codes
-        """
-        result = self.encoder(input)
-        result = torch.flatten(result, start_dim=1)
-
-        # Split the result into mu and var components
-        # of the latent Gaussian distribution
-        mu = self.fc_mu(result)
-        log_var = self.fc_var(result)
-
-        return [mu, log_var]
-
-    def decode(self, z: Tensor) -> Tensor:
-        """
-        Maps the given latent codes
-        onto the image space.
-        :param z: (Tensor) [B x D]
-        :return: (Tensor) [B x C x H x W]
-        """
-        result = self.decoder_input(z)
-        result = result.view(-1, 512, 2, 2)
-        result = self.decoder(result)
-        result = self.final_layer(result)
-        return result
-
-    def reparameterize(self, mu: Tensor, logvar: Tensor) -> Tensor:
-        """
-        Reparameterization trick to sample from N(mu, var) from
-        N(0,1).
-        :param mu: (Tensor) Mean of the latent Gaussian [B x D]
-        :param logvar: (Tensor) Standard deviation of the latent Gaussian [B x D]
-        :return: (Tensor) [B x D]
-        """
-        std = torch.exp(0.5 * logvar)
-        eps = torch.randn_like(std)
-        return eps * std + mu
-
-    def forward(self, input: Tensor, **kwargs) -> List[Tensor]:
-        mu, log_var = self.encode(input)
-        z = self.reparameterize(mu, log_var)
-        return  [self.decode(z), input, mu, log_var]
-
-    def loss_function(self,
-                      *args,
-                      **kwargs) -> dict:
-        """
-        Computes the VAE loss function.
-        KL(N(\mu, \sigma), N(0, 1)) = \log \frac{1}{\sigma} + \frac{\sigma^2 + \mu^2}{2} - \frac{1}{2}
-        :param args:
-        :param kwargs:
-        :return:
-        """
-        recons = args[0]
-        input = args[1]
-        mu = args[2]
-        log_var = args[3]
-
-        kld_weight = kwargs['M_N'] # Account for the minibatch samples from the dataset
-        recons_loss =F.mse_loss(recons, input)
-
-
-        kld_loss = torch.mean(-0.5 * torch.sum(1 + log_var - mu ** 2 - log_var.exp(), dim = 1), dim = 0)
-
-        loss = recons_loss + kld_weight * kld_loss
-        return {'loss': loss, 'Reconstruction_Loss':recons_loss.detach(), 'KLD':-kld_loss.detach()}
-
-    def sample(self,
-               num_samples:int,
-               current_device: int, **kwargs) -> Tensor:
-        """
-        Samples from the latent space and return the corresponding
-        image space map.
-        :param num_samples: (Int) Number of samples
-        :param current_device: (Int) Device to run the model
-        :return: (Tensor)
-        """
-        z = torch.randn(num_samples,
-                        self.latent_dim)
-
-        z = z.to(current_device)
-
-        samples = self.decode(z)
-        return samples
-
-    def generate(self, x: Tensor, **kwargs) -> Tensor:
-        """
-        Given an input image x, returns the reconstructed image
-        :param x: (Tensor) [B x C x H x W]
-        :return: (Tensor) [B x C x H x W]
-        """
-
-        return self.forward(x)[0]
-
+    def set_device(self, device):
+        self.device = device
 
 class MDN_RNN(nn.Module):
     #Mixture Density Network Recurrent neural network
@@ -353,56 +269,15 @@ class MDN_RNN(nn.Module):
 
     def forward(self, h, a, z):
         
-        return self.RNN_MDN(np.array([h, a, z]))
+        return self.RNN_MDN(np.array([h, a, z])), self.gmm.mu, self.gmm.var
     
     def getHiddenState(self):
         input_data = torch.randn((1, 5, self.input_size))
-        _, hidden_state = self.RNN(input_data)
+        h0 = torch.randn(1, 5, 5)
+        _, hidden_state = self.RNN(input_data, h0)
         return hidden_state
     
-class CustomDataset(Dataset):
-    def __init__(self, annotations_file, img_dir, transform=None, target_transform=None):
-        
-        self.img_dir = img_dir
-        self.transform = transform
-        self.target_transform = target_transform
-
-    def __len__(self):
-        return len(self.img_labels)
-
-    def __getitem__(self, idx):
-
-        label = self.img_labels.iloc[idx, 1]
-        if self.transform:
-            image = self.transform(image)
-        if self.target_transform:
-            label = self.target_transform(label)
-        return image, label
-    def loss_function(self,
-                      *args,
-                      **kwargs) -> dict:
-        """
-        Computes the MDN_RNN loss function.
-        KL(N(\mu, \sigma), N(0, 1)) = \log \frac{1}{\sigma} + \frac{\sigma^2 + \mu^2}{2} - \frac{1}{2}
-        :param args:
-        :param kwargs:
-        :return:
-        """
-        recons = args[0]
-        input = args[1]
-        mu = args[2]
-        log_var = args[3]
-
-        kld_weight = kwargs['M_N'] # Account for the minibatch samples from the dataset
-        recons_loss =F.mse_loss(recons, input)
-
-
-        kld_loss = torch.mean(-0.5 * torch.sum(1 + log_var - mu ** 2 - log_var.exp(), dim = 1), dim = 0)
-
-        loss = recons_loss + kld_weight * kld_loss
-        return {'loss': loss, 'Reconstruction_Loss':recons_loss.detach(), 'KLD':-kld_loss.detach()}
-    
-class GaussianMixture(torch.nn.Module):
+class GaussianMixture(nn.Module):
     """
     Fits a mixture of k=1,..,K Gaussians to the input data (K is supplied via n_components).
     Input tensors are expected to be flat with dimensions (n: number of samples, d: number of features).
