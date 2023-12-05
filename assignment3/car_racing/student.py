@@ -7,6 +7,8 @@ import numpy as np
 from torch import Tensor, List
 from torch.utils.data import Dataset
 import math
+from torch.distributions.normal import Normal
+import cma
 
 class Policy(nn.Module):
     continuous = True # you can change this
@@ -21,13 +23,14 @@ class Policy(nn.Module):
         latent_dim = 100
         hidden_size = 5
         self.VAE = VAE(latent_size = latent_dim)
-        self.MDN_RNN = MDN_RNN(input_size = latent_dim+3+10, hidden_size = hidden_size, num_layers = 1, dropout = 0.1)
+        self.MDN_RNN = MDN_RNN(input_size = latent_dim, output_size=latent_dim)
+        #self.MDN_RNN = MDRNN(latent_dim, 3, hidden_size, 10)
         self.C = nn.Linear(latent_dim + hidden_size, 3 )
 
     def forward(self, x):
         # TODO
         print(x.shape)
-        z = self.VAE.encode(x[2:4])      
+        z = self.VAE.encode(x)      
         a = self.C(z, self.MDN_RNN.getHiddenState())
         a = torch.clip(a, min = -1, max = 1 )
         h = self.MDN_RNN(z, a, h)
@@ -36,7 +39,7 @@ class Policy(nn.Module):
     
     def act(self, state):
         # TODO
-        z = self.VAE.encode(state[2:4])      
+        z = self.VAE.encode(state)      
         a = self.C(z, self.MDN_RNN.getHiddenState())
         a = torch.clip(a, min = -1, max = 1 )
 
@@ -47,61 +50,72 @@ class Policy(nn.Module):
         #first initialization / skip if load from file
         rollout = []
         rolloutA = []
-        rolloutH = []
+        
         num_rolloutVAE = 32*1
-        h = self.MDN_RNN.getHiddenState()
-        for _ in range(num_rolloutVAE):
+       
+        for i in range(num_rolloutVAE):
            a = self.env.action_space.sample()
            observation, reward, terminated, truncated, info = self.env.step(a)
            observation = torch.from_numpy(observation)
+           
            rollout.append(observation)
            rolloutA.append(a)
-           rolloutH.append(h)
+           if (i + 1) % 32*10 == 0:
+                state, _ = self.env.reset()
+           
         
         rollout = torch.stack(rollout, dim=0)
-        print(f'SHAPE -->{rollout.shape}')
         rollout = rollout.permute(0,1,3,2).permute(0,2,1,3)
-        print(f'SHAPE -->{rollout.shape}')
 
         optimizerVAE = torch.optim.Adam(self.VAE.parameters(), lr=0.01)
         batch_sizeVAE = 32
         num_epochsVAE = 100
 
-        self.trainmodule(self.VAE, optimizerVAE, rollout, batch_sizeVAE, num_epochsVAE)
+        self.trainmodule(self.VAE, optimizerVAE, rollout.float(), batch_sizeVAE, num_epochsVAE)
 
         mu, logvar = self.VAE.encode(rollout.float())
-        rolloutZ = self.VAE.latent(mu, logvar)
+        rolloutZ = self.VAE.latent(mu, logvar).detach()
+
+
+        rolloutA = torch.tensor(np.array(rolloutA)).detach()
+
+
+        rolloutRNN = torch.concat((rolloutA, rolloutZ), dim=1)
+
+        # seq_len = rolloutRNN.shape[0]
+        # zero_pad = torch.zeros(1000-seq_len,103)
+        # rolloutRNN = torch.cat((rolloutRNN,zero_pad), dim=0)
+
+
+
+
+        rolloutH = self.MDN_RNN.forward_lstm(rolloutRNN)
+
+        
 
         optimizerRNN = torch.optim.Adam(self.MDN_RNN.parameters(), lr=0.01)
         batch_sizeRNN = 32
         num_epochsRNN = 100
 
-        self.trainmodule(self.MDN_RNN, optimizerRNN, rolloutZ, batch_sizeRNN, num_epochsRNN)
+        self.trainmodule(self.MDN_RNN, optimizerRNN, rolloutRNN, batch_sizeRNN, num_epochsRNN)
 
  
         #MDN_RNN.train()
 
         # Example usage
-        
-        sigma = 1.0
 
-        cmaes_optimizer = CMAESOptimizer(self.C.parameters(), sigma, )
-        xmin_result = cmaes_optimizer.optimize()
-
-        state_dict = self.C.state_dict()
-        state_dict = xmin_result
-        self.C.load_state_dict(state_dict)
-
-        #print("Optimal solution:", xmin_result)
+        cma.CMAEvolutionStrategy()
 
         #CMA-ES(C).train
         for _ in range(10):
             rollout = []
             state, _ = self.env.reset()
             for _ in range(10000):
+                print(state.shape)
+                state = torch.tensor(state).permute(0,2,1).permute(1,0,2)
                 a = self.act(state)
                 observation, reward, terminated, truncated, info = self.env.step(a)
-                rollout.append(observation[2:4])
+                rollout.append(observation)
                 observation = state
                 
 
@@ -120,6 +134,8 @@ class Policy(nn.Module):
             optimizerRNN = torch.optim.Adam(self.RNN.parameters(), lr=0.01)
             batch_sizeRNN = 32
             num_epochsRNN = 100
+
+            
 
             self.trainmodule(self.MDN_RNN, optimizerRNN, rollout, batch_sizeRNN, num_epochsRNN)
 
@@ -142,8 +158,8 @@ class Policy(nn.Module):
         for epoch in range(num_epochs):
             for i in range(0, len(data), batch_size):
                 # Get batch
-                X_batch = torch.tensor(np.array(data[i:i+batch_size]), dtype=torch.float)
-                y_batch = torch.tensor(np.array(data[i:i+batch_size]), dtype=torch.float)
+                X_batch = data[i:i+batch_size]
+                y_batch = data[i:i+batch_size]
 
 
                 # Forward pass
@@ -258,350 +274,104 @@ class VAE(nn.Module):
     def set_device(self, device):
         self.device = device
 
-class MDN_RNN(nn.Module):
-    #Mixture Density Network Recurrent neural network
-    def __init__(self, input_size, hidden_size, num_layers, dropout):
-        super(MDN_RNN, self).__init__()
-        self.RNN = nn.RNN(input_size, hidden_size, num_layers, dropout)
-        self.gmm = GaussianMixture(10, hidden_size)
-        self.RNN_MDN = nn.Sequential(self.RNN, self.gmm) 
+class MDN(nn.Module):
+    
+    def __init__(self, input_size, output_size, K, units=512):
+        super().__init__()
+        
         self.input_size = input_size
-
-    def forward(self, h, a, z):
+        self.output_size = output_size
+        self.K = K
         
-        return self.RNN_MDN(np.array([h, a, z])), self.gmm.mu, self.gmm.var
-    
-    def getHiddenState(self):
-        input_data = torch.randn((1, 5, self.input_size))
-        h0 = torch.randn(1, 5, 5)
-        _, hidden_state = self.RNN(input_data, h0)
-        return hidden_state
-    
-class GaussianMixture(nn.Module):
-    """
-    Fits a mixture of k=1,..,K Gaussians to the input data (K is supplied via n_components).
-    Input tensors are expected to be flat with dimensions (n: number of samples, d: number of features).
-    The model then extends them to (n, 1, d).
-    The model parametrization (mu, sigma) is stored as (1, k, d),
-    probabilities are shaped (n, k, 1) if they relate to an individual sample,
-    or (1, k, 1) if they assign membership probabilities to one of the mixture components.
-    """
-    def __init__(self, n_components, n_features, covariance_type="full", eps=1.e-6, init_params="kmeans", mu_init=None, var_init=None):
-        """
-        Initializes the model and brings all tensors into their required shape.
-        The class expects data to be fed as a flat tensor in (n, d).
-        The class owns:
-            x:               torch.Tensor (n, 1, d)
-            mu:              torch.Tensor (1, k, d)
-            var:             torch.Tensor (1, k, d) or (1, k, d, d)
-            pi:              torch.Tensor (1, k, 1)
-            covariance_type: str
-            eps:             float
-            init_params:     str
-            log_likelihood:  float
-            n_components:    int
-            n_features:      int
-        args:
-            n_components:    int
-            n_features:      int
-        options:
-            mu_init:         torch.Tensor (1, k, d)
-            var_init:        torch.Tensor (1, k, d) or (1, k, d, d)
-            covariance_type: str
-            eps:             float
-            init_params:     str
-        """
-        super(GaussianMixture, self).__init__()
-
-        self.n_components = n_components
-        self.n_features = n_features
-
-        self.mu_init = mu_init
-        self.var_init = var_init
-        self.eps = eps
-
-        self.log_likelihood = -np.inf
-
-        self.covariance_type = covariance_type
-        self.init_params = init_params
-
-        assert self.covariance_type in ["full", "diag"]
-        assert self.init_params in ["kmeans", "random"]
-
-        self._init_params()
-
-
-    def _init_params(self):
-        if self.mu_init is not None:
-            assert self.mu_init.size() == (1, self.n_components, self.n_features), "Input mu_init does not have required tensor dimensions (1, %i, %i)" % (self.n_components, self.n_features)
-            # (1, k, d)
-            self.mu = torch.nn.Parameter(self.mu_init, requires_grad=False)
-        else:
-            self.mu = torch.nn.Parameter(torch.randn(1, self.n_components, self.n_features), requires_grad=False)
-
-        if self.covariance_type == "diag":
-            if self.var_init is not None:
-                # (1, k, d)
-                assert self.var_init.size() == (1, self.n_components, self.n_features), "Input var_init does not have required tensor dimensions (1, %i, %i)" % (self.n_components, self.n_features)
-                self.var = torch.nn.Parameter(self.var_init, requires_grad=False)
-            else:
-                self.var = torch.nn.Parameter(torch.ones(1, self.n_components, self.n_features), requires_grad=False)
-        elif self.covariance_type == "full":
-            if self.var_init is not None:
-                # (1, k, d, d)
-                assert self.var_init.size() == (1, self.n_components, self.n_features, self.n_features), "Input var_init does not have required tensor dimensions (1, %i, %i, %i)" % (self.n_components, self.n_features, self.n_features)
-                self.var = torch.nn.Parameter(self.var_init, requires_grad=False)
-            else:
-                self.var = torch.nn.Parameter(
-                    torch.eye(self.n_features).reshape(1, 1, self.n_features, self.n_features).repeat(1, self.n_components, 1, 1),
-                    requires_grad=False
-                )
-
-        # (1, k, 1)
-        self.pi = torch.nn.Parameter(torch.Tensor(1, self.n_components, 1), requires_grad=False).fill_(1. / self.n_components)
-        self.params_fitted = False
-
-
-    def check_size(self, x):
-        if len(x.size()) == 2:
-            # (n, d) --> (n, 1, d)
-            x = x.unsqueeze(1)
-
-        return x
-    
-    def fit(self, x, delta=1e-3, n_iter=100, warm_start=False):
-        """
-        Fits model to the data.
-        args:
-            x:          torch.Tensor (n, d) or (n, k, d)
-        options:
-            delta:      float
-            n_iter:     int
-            warm_start: bool
-        """
-        if not warm_start and self.params_fitted:
-            self._init_params()
-
-        x = self.check_size(x)
-
-        if self.init_params == "kmeans" and self.mu_init is None:
-            mu = self.get_kmeans_mu(x, n_centers=self.n_components)
-            self.mu.data = mu
-
-        i = 0
-        j = np.inf
-
-        while (i <= n_iter) and (j >= delta):
-
-            log_likelihood_old = self.log_likelihood
-            mu_old = self.mu
-            var_old = self.var
-
-            self.__em(x)
-            self.log_likelihood = self.__score(x)
-
-            if torch.isinf(self.log_likelihood.abs()) or torch.isnan(self.log_likelihood):
-                device = self.mu.device
-                # When the log-likelihood assumes unbound values, reinitialize model
-                self.__init__(self.n_components,
-                    self.n_features,
-                    covariance_type=self.covariance_type,
-                    mu_init=self.mu_init,
-                    var_init=self.var_init,
-                    eps=self.eps)
-                for p in self.parameters():
-                    p.data = p.data.to(device)
-                if self.init_params == "kmeans":
-                    self.mu.data, = self.get_kmeans_mu(x, n_centers=self.n_components)
-
-            i += 1
-            j = self.log_likelihood - log_likelihood_old
-
-            if j <= delta:
-                # When score decreases, revert to old parameters
-                self.__update_mu(mu_old)
-                self.__update_var(var_old)
-
-        self.params_fitted = True
-
-
-    def predict(self, x, probs=False):
-        """
-        Assigns input data to one of the mixture components by evaluating the likelihood under each.
-        If probs=True returns normalized probabilities of class membership.
-        args:
-            x:          torch.Tensor (n, d) or (n, 1, d)
-            probs:      bool
-        returns:
-            p_k:        torch.Tensor (n, k)
-            (or)
-            y:          torch.LongTensor (n)
-        """
-        x = self.check_size(x)
-
-        weighted_log_prob = self._estimate_log_prob(x) + torch.log(self.pi)
-
-        if probs:
-            p_k = torch.exp(weighted_log_prob)
-            return torch.squeeze(p_k / (p_k.sum(1, keepdim=True)))
-        else:
-            return torch.squeeze(torch.max(weighted_log_prob, 1)[1].type(torch.LongTensor))
-
-
-    def predict_proba(self, x):
-        """
-        Returns normalized probabilities of class membership.
-        args:
-            x:          torch.Tensor (n, d) or (n, 1, d)
-        returns:
-            y:          torch.LongTensor (n)
-        """
-        return self.predict(x, probs=True)
-
-
-    def sample(self, n):
-        """
-        Samples from the model.
-        args:
-            n:          int
-        returns:
-            x:          torch.Tensor (n, d)
-            y:          torch.Tensor (n)
-        """
-        counts = torch.distributions.multinomial.Multinomial(total_count=n, probs=self.pi.squeeze()).sample()
-        x = torch.empty(0, device=counts.device)
-        y = torch.cat([torch.full([int(sample)], j, device=counts.device) for j, sample in enumerate(counts)])
-
-        # Only iterate over components with non-zero counts
-        for k in np.arange(self.n_components)[counts > 0]: 
-            if self.covariance_type == "diag":
-                x_k = self.mu[0, k] + torch.randn(int(counts[k]), self.n_features, device=x.device) * torch.sqrt(self.var[0, k])
-            elif self.covariance_type == "full":
-                d_k = torch.distributions.multivariate_normal.MultivariateNormal(self.mu[0, k], self.var[0, k])
-                x_k = torch.stack([d_k.sample() for _ in range(int(counts[k]))])
-
-            x = torch.cat((x, x_k), dim=0)
-
-        return x, y
-    
-    def __update_mu(self, mu):
-        """
-        Updates mean to the provided value.
-        args:
-            mu:         torch.FloatTensor
-        """
-        assert mu.size() in [(self.n_components, self.n_features), (1, self.n_components, self.n_features)], "Input mu does not have required tensor dimensions (%i, %i) or (1, %i, %i)" % (self.n_components, self.n_features, self.n_components, self.n_features)
-
-        if mu.size() == (self.n_components, self.n_features):
-            self.mu = mu.unsqueeze(0)
-        elif mu.size() == (1, self.n_components, self.n_features):
-            self.mu.data = mu
-
-
-    def __update_var(self, var):
-        """
-        Updates variance to the provided value.
-        args:
-            var:        torch.FloatTensor
-        """
-        if self.covariance_type == "full":
-            assert var.size() in [(self.n_components, self.n_features, self.n_features), (1, self.n_components, self.n_features, self.n_features)], "Input var does not have required tensor dimensions (%i, %i, %i) or (1, %i, %i, %i)" % (self.n_components, self.n_features, self.n_features, self.n_components, self.n_features, self.n_features)
-
-            if var.size() == (self.n_components, self.n_features, self.n_features):
-                self.var = var.unsqueeze(0)
-            elif var.size() == (1, self.n_components, self.n_features, self.n_features):
-                self.var.data = var
-
-        elif self.covariance_type == "diag":
-            assert var.size() in [(self.n_components, self.n_features), (1, self.n_components, self.n_features)], "Input var does not have required tensor dimensions (%i, %i) or (1, %i, %i)" % (self.n_components, self.n_features, self.n_components, self.n_features)
-
-            if var.size() == (self.n_components, self.n_features):
-                self.var = var.unsqueeze(0)
-            elif var.size() == (1, self.n_components, self.n_features):
-                self.var.data = var
-
-
-    def __update_pi(self, pi):
-        """
-        Updates pi to the provided value.
-        args:
-            pi:         torch.FloatTensor
-        """
-        assert pi.size() in [(1, self.n_components, 1)], "Input pi does not have required tensor dimensions (%i, %i, %i)" % (1, self.n_components, 1)
-
-        self.pi.data = pi
-
-
+        self.l1 = nn.Linear(input_size, 3 * K * output_size)
         
-class CMAESOptimizer:
-    def __init__(self, initial_params, sigma, fitness_function, max_evaluations=10000, stop_fitness=1e-10):
-        self.N = len(initial_params)
-        self.initial_params = torch.tensor(initial_params, dtype=torch.float32, requires_grad=True)
-        self.sigma = sigma
-        self.fitness_function = fitness_function
-        self.max_evaluations = max_evaluations
-        self.stop_fitness = stop_fitness
+        self.oneDivSqrtTwoPI = 1.0 / np.sqrt(2.0*np.pi)
+        
+    def forward(self, x):
+        batch_size, seq_len = x.shape[0],x.shape[1]
 
-    def _evaluate_population(self, xmeanw, BD):
-        lambda_ = len(xmeanw)
-        arfitness = torch.zeros(lambda_ + 1)
-        arfitness[0] = 2 * abs(self.stop_fitness) + 1
+        out = self.l1(x)
 
-        for k in range(1, lambda_ + 1):
-            arz = torch.randn(self.N)
-            arx = xmeanw + self.sigma * (BD @ arz)
-            arfitness[k] = self.fitness_function(arx)
+        pi, sigma, mu  = torch.split(out, (self.K * self.output_size , self.K * self.output_size, self.K * self.output_size), dim=2)
+        
+         
+        sigma = sigma.view(batch_size, seq_len, self.K, self.output_size)
+        sigma = torch.exp(sigma)
+        
+        mu = mu.view(batch_size, seq_len, self.K, self.output_size)
 
-        return arfitness
+        pi = pi.view(batch_size, seq_len, self.K, self.output_size)
+        pi = F.softmax(pi, dim=2)
+        
+        return pi, sigma, mu
+    
+    def gaussian_distribution(self, y, mu, sigma):
+        y = y.unsqueeze(2).expand_as(sigma)
+        
+        out = (y - mu) / sigma
+        out = -0.5 * (out * out)
+        out = (torch.exp(out) / sigma) * self.oneDivSqrtTwoPI
 
-    def optimize(self):
-        xmeanw = self.initial_params.clone().detach().requires_grad_()
-        B = torch.eye(self.N)
-        D = torch.eye(self.N)
-        BD = B @ D
-        C = BD @ BD.t()
-        pc = torch.zeros(self.N)
-        ps = torch.zeros(self.N)
-        cw = torch.ones(self.N) / math.sqrt(self.N)
-        chiN = math.sqrt(self.N) * (1 - 1 / (4 * self.N) + 1 / (21 * self.N ** 2))
+        return out
+    
+    def loss(self, y, pi, mu, sigma):
 
-        count_eval = 0
+        out = self.gaussian_distribution(y, mu, sigma)
+        out = out * pi
+        out = torch.sum(out, dim=2)
+        
+        # kill (inf) nan loss
+        out[out <= float(1e-24)] = 1
+        
+        out = -torch.log(out)
+        out = torch.mean(out)
+        
+        return out
+    
+class MDN_RNN(nn.Module):
 
-        while count_eval < self.max_evaluations:
-            arfitness = self._evaluate_population(xmeanw, BD)
-            if arfitness[0] <= self.stop_fitness:
-                break
+    def __init__(self, input_size, output_size, mdn_units=512, hidden_size=256, num_mixs=5):
+        super(MDN_RNN, self).__init__()
 
-            # Sort by fitness and compute weighted mean
-            _, arindex = arfitness.sort()
-            xmeanw = xmeanw[:, arindex[:-1]]
+        self.hidden_size = hidden_size
+        self.num_mixs = num_mixs
+        self.input_size = input_size
+        self.output_size = output_size
+        
+        self.lstm = nn.LSTM(input_size, hidden_size, 1, batch_first=True)
+        self.mdn = MDN(hidden_size, output_size, num_mixs, mdn_units)
 
-            zmeanw = torch.randn_like(xmeanw)
-            xmeanw = xmeanw @ cw
-            zmeanw = zmeanw @ cw
+    def forward(self, x, state=None):
+        
+        y = None
+        x = x.unsqueeze(0) # batch first
+        if state is None:
+            y, state = self.lstm(x)
+        else:
+            y, state = self.lstm(x, state)
+        
+        pi, sigma, mu = self.mdn(y)
+        
+        return state, sigma, mu
+            
+    def forward_lstm(self, x, state=None):
+        
+        y = None
+        x = x.unsqueeze(0) # batch first
+        if state is None:
+            y, state = self.lstm(x)
+        else:
+            y, state = self.lstm(x, state)
 
-            # Adapt covariance matrix
-            pc = (1 - 0.25) * pc + math.sqrt(0.25 * (2 - 0.25)) * (BD @ zmeanw)
-            C = (1 - 0.25) * C + 0.25 * pc.view(-1, 1) @ pc.view(1, -1)
+        return y, state
+# outputs, y_batch, mu, logvar
+    def loss_function(self, out, y, mu, logvar):
+        #BCE = F.binary_cross_entropy(out, y, reduction="sum")
+        KL = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+        return KL
 
-            # Adapt sigma
-            ps = (1 - 0.25) * ps + math.sqrt(0.25 * (2 - 0.25)) * (B @ zmeanw)
-            self.sigma = self.sigma * math.exp((ps.norm() - chiN) / chiN / (1 + 0.01 * chiN))
-
-            # Update B and D from C
-            if count_eval % (self.N * 10) < 1:
-                C = torch.triu(C) + torch.triu(C, 1).t()  # enforce symmetry
-                B, D = torch.symeig(C, eigenvectors=True)
-                D = torch.diag(torch.sqrt(D))
-                BD = B @ D  # for speed up only
-
-            count_eval += 1
-
-            print(f'{count_eval}: {arfitness[0]}')
-
-        xmin = xmeanw[:, arindex[0]]
-        return xmin
+    def get_hidden_size(self):
+        return self.hidden_size
 
 
-
-
+    
