@@ -51,7 +51,7 @@ class Policy(nn.Module):
         rollout = []
         rolloutA = []
         
-        num_rolloutVAE = 32*1
+        num_rolloutVAE = 32*100
        
         for i in range(num_rolloutVAE):
            a = self.env.action_space.sample()
@@ -60,14 +60,14 @@ class Policy(nn.Module):
            
            rollout.append(observation)
            rolloutA.append(a)
-           if (i + 1) % 32*10 == 0:
+           if (i + 1) % (32*100) == 0:
                 state, _ = self.env.reset()
            
         
         rollout = torch.stack(rollout, dim=0)
         rollout = rollout.permute(0,1,3,2).permute(0,2,1,3)
 
-        optimizerVAE = torch.optim.Adam(self.VAE.parameters(), lr=0.01)
+        optimizerVAE = torch.optim.Adam(self.VAE.parameters(), lr=1e-3)
         batch_sizeVAE = 32
         num_epochsVAE = 100
 
@@ -104,7 +104,7 @@ class Policy(nn.Module):
 
         # Example usage
 
-        cma.CMAEvolutionStrategy()
+        cma.CMAEvolutionStrategy(self.C.parameters(), 1)
 
         #CMA-ES(C).train
         for _ in range(10):
