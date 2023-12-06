@@ -65,7 +65,7 @@ class Policy(nn.Module):
         rollout = torch.stack(rollout, dim=0)
         rollout = rollout.permute(0,1,3,2).permute(0,2,1,3)
 
-        optimizerVAE = torch.optim.Adam(self.VAE.parameters(), lr=5e-1)
+        optimizerVAE = torch.optim.Adam(self.VAE.parameters(), lr=2.5e-1)
         batch_sizeVAE = 32
         num_epochsVAE = 150
 
@@ -169,11 +169,17 @@ class VAE(nn.Module):
         self.device = None
         
         # encoder
+        self.batch_norm_img = nn.BatchNorm2d(3)
+        self.norm_img = nn.BatchNorm1d(3)
         self.conv1 = nn.Conv2d(in_channels=3, out_channels=16, kernel_size=3, stride=2, padding=1)
+        self.batch_norm1 = nn.BatchNorm2d(16)
+        self.norm1 = nn.BatchNorm1d(16)
         self.conv2 = nn.Conv2d(in_channels=16, out_channels=32, kernel_size=3, stride=2, padding=1)
+        self.batch_norm2 = nn.BatchNorm2d(64)
+        self.norm2 = nn.BatchNorm1d(64)
         self.conv3 = nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3, stride=2, padding=1)
-        self.batch_norm = nn.BatchNorm2d(64)
-        self.norm = nn.BatchNorm1d(64)
+        self.batch_norm3 = nn.BatchNorm2d(64)
+        self.norm3 = nn.BatchNorm1d(64)
         self.adaptive_pool = nn.AdaptiveAvgPool2d((4, 4))
         
         # z
@@ -203,13 +209,25 @@ class VAE(nn.Module):
         if len(x.shape)>3:
             self.batch_size = x.shape[0]
         
+        if self.batch_size >1: 
+            x = self.batch_norm_img(x)
+        else:
+            x = self.norm_img(x)
         out = F.relu(self.conv1(x))
+        if self.batch_size >1: 
+            out = self.batch_norm1(out)
+        else:
+            out = self.norm1(out)
         out = F.relu(self.conv2(out))
+        if self.batch_size >1: 
+            out = self.batch_norm2(out)
+        else:
+            out = self.norm2(out)
         out = F.relu(self.conv3(out))
         if self.batch_size >1: 
-            out = self.batch_norm(out)
+            out = self.batch_norm3(out)
         else:
-            out = self.norm(out)
+            out = self.norm3(out)
         out = F.relu(self.adaptive_pool(out))
         out = out.reshape(self.batch_size,1024)
         
