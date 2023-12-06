@@ -29,7 +29,6 @@ class Policy(nn.Module):
 
     def forward(self, x):
         # TODO
-        print(x.shape)
         z = self.VAE.encode(x)      
         a = self.C(z, self.MDN_RNN.getHiddenState())
         a = torch.clip(a, min = -1, max = 1 )
@@ -51,7 +50,7 @@ class Policy(nn.Module):
         rollout = []
         rolloutA = []
         
-        num_rolloutVAE = 32*100
+        num_rolloutVAE = 32*10
        
         for i in range(num_rolloutVAE):
            a = self.env.action_space.sample()
@@ -60,14 +59,13 @@ class Policy(nn.Module):
            
            rollout.append(observation)
            rolloutA.append(a)
-           if (i + 1) % (32*100) == 0:
-                state, _ = self.env.reset()
-           
+           #if (i + 1) % (32*100) == 0:
+           #    state, _ = self.env.reset()
         
         rollout = torch.stack(rollout, dim=0)
         rollout = rollout.permute(0,1,3,2).permute(0,2,1,3)
 
-        optimizerVAE = torch.optim.Adam(self.VAE.parameters(), lr=1e-3)
+        optimizerVAE = torch.optim.Adam(self.VAE.parameters(), lr=9e-5)
         batch_sizeVAE = 32
         num_epochsVAE = 100
 
@@ -76,35 +74,26 @@ class Policy(nn.Module):
         mu, logvar = self.VAE.encode(rollout.float())
         rolloutZ = self.VAE.latent(mu, logvar).detach()
 
-
         rolloutA = torch.tensor(np.array(rolloutA)).detach()
-
 
         rolloutRNN = torch.concat((rolloutA, rolloutZ), dim=1)
 
-        # seq_len = rolloutRNN.shape[0]
-        # zero_pad = torch.zeros(1000-seq_len,103)
-        # rolloutRNN = torch.cat((rolloutRNN,zero_pad), dim=0)
-
-
-
-
         rolloutH = self.MDN_RNN.forward_lstm(rolloutRNN)
 
-        
-
-        optimizerRNN = torch.optim.Adam(self.MDN_RNN.parameters(), lr=0.01)
+        optimizerRNN = torch.optim.Adam(self.MDN_RNN.parameters(), lr=9e-4)
         batch_sizeRNN = 32
         num_epochsRNN = 100
 
         self.trainmodule(self.MDN_RNN, optimizerRNN, rolloutRNN, batch_sizeRNN, num_epochsRNN)
 
- 
         #MDN_RNN.train()
 
         # Example usage
+        
+        for param in self.C.parameters():
+            print(param)
 
-        cma.CMAEvolutionStrategy(self.C.parameters(), 1)
+        cma.CMAEvolutionStrategy(param.float().detach().numpy(), 1)
 
         #CMA-ES(C).train
         for _ in range(10):
@@ -118,7 +107,6 @@ class Policy(nn.Module):
                 rollout.append(observation)
                 observation = state
                 
-
             optimizerVAE = torch.optim.Adam(self.VAE.parameters(), lr=0.01)
             batch_sizeVAE = 32
             num_epochsVAE = 100
@@ -136,11 +124,7 @@ class Policy(nn.Module):
             num_epochsRNN = 100
 
             
-
             self.trainmodule(self.MDN_RNN, optimizerRNN, rollout, batch_sizeRNN, num_epochsRNN)
-
-        
-
         return
 
     def save(self):
