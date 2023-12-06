@@ -9,6 +9,8 @@ from torch.utils.data import Dataset
 import math
 from torch.distributions.normal import Normal
 import cma
+from queue import Queue
+from collections import deque 
 
 class Policy(nn.Module):
     continuous = True # you can change this
@@ -38,8 +40,19 @@ class Policy(nn.Module):
     
     def act(self, state):
         # TODO
+# z = vae.encode(obs)
+# a = controller.action([z, h])
+# obs, reward, done = env.step(a)
+# cumulative_reward += reward
+# h = rnn.forward([a, z, h])
+
         z = self.VAE.encode(state.float())      
-        a = self.C(z, self.MDN_RNN.forward_lstm(torch.tensor(z)))
+        #print(list(z))
+        if first:
+            a = [0,0,0]
+        rolloutRNN = torch.concat((a, z), dim=1)
+        h = self.MDN_RNN.forward_lstm(list(z))
+        a = self.C(torch.tensor([z, h]))
         torch.clip(a, min = -1, max = 1 )
 
         return a
@@ -55,7 +68,7 @@ class Policy(nn.Module):
         for i in range(num_rolloutVAE):
            a = self.env.action_space.sample()
            observation, reward, terminated, truncated, info = self.env.step(a)
-           observation = torch.from_numpy(observation)
+           observation = torch.from_numpy(observation/255)
            
            rollout.append(observation)
            rolloutA.append(a)
@@ -65,9 +78,9 @@ class Policy(nn.Module):
         rollout = torch.stack(rollout, dim=0)
         rollout = rollout.permute(0,1,3,2).permute(0,2,1,3)
 
-        optimizerVAE = torch.optim.Adam(self.VAE.parameters(), lr=2.5e-1)
+        optimizerVAE = torch.optim.Adam(self.VAE.parameters(), lr=1e-4)
         batch_sizeVAE = 32
-        num_epochsVAE = 150
+        num_epochsVAE = 10
 
         self.trainmodule(self.VAE, optimizerVAE, rollout.float(), batch_sizeVAE, num_epochsVAE)
 
@@ -82,7 +95,7 @@ class Policy(nn.Module):
 
         optimizerRNN = torch.optim.Adam(self.MDN_RNN.parameters(), lr=7e-4)
         batch_sizeRNN = 32
-        num_epochsRNN = 50
+        num_epochsRNN = 20
 
         self.trainmodule(self.MDN_RNN, optimizerRNN, rolloutRNN, batch_sizeRNN, num_epochsRNN)
 
@@ -91,20 +104,21 @@ class Policy(nn.Module):
         # Example usage
         
         for param in self.C.parameters():
-            print(param)
+            param
+            #print(param)
 
-        cma.CMAEvolutionStrategy(param.float().detach().numpy(), 1)
+        cma = cma.CMAEvolutionStrategy(param.float().detach().numpy(), 1)
 
         #CMA-ES(C).train
         for _ in range(10):
             rollout = []
             state, _ = self.env.reset()
             for _ in range(10000):
-                print(state.shape)
                 state = torch.tensor(state).permute(0,2,1).permute(1,0,2)
+                print(state.shape)
                 a = self.act(state)
                 observation, reward, terminated, truncated, info = self.env.step(a)
-                rollout.append(observation)
+                rollout.append(observation/255)
                 observation = state
                 
             optimizerVAE = torch.optim.Adam(self.VAE.parameters(), lr=5e-7)
@@ -175,8 +189,8 @@ class VAE(nn.Module):
         self.batch_norm1 = nn.BatchNorm2d(16)
         self.norm1 = nn.BatchNorm1d(16)
         self.conv2 = nn.Conv2d(in_channels=16, out_channels=32, kernel_size=3, stride=2, padding=1)
-        self.batch_norm2 = nn.BatchNorm2d(64)
-        self.norm2 = nn.BatchNorm1d(64)
+        self.batch_norm2 = nn.BatchNorm2d(32)
+        self.norm2 = nn.BatchNorm1d(32)
         self.conv3 = nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3, stride=2, padding=1)
         self.batch_norm3 = nn.BatchNorm2d(64)
         self.norm3 = nn.BatchNorm1d(64)
@@ -209,25 +223,25 @@ class VAE(nn.Module):
         if len(x.shape)>3:
             self.batch_size = x.shape[0]
         
-        if self.batch_size >1: 
-            x = self.batch_norm_img(x)
-        else:
-            x = self.norm_img(x)
+        # if self.batch_size >1: 
+        #     x = self.batch_norm_img(x)
+        # else:
+        #     x = self.norm_img(x)
         out = F.relu(self.conv1(x))
-        if self.batch_size >1: 
-            out = self.batch_norm1(out)
-        else:
-            out = self.norm1(out)
+        # if self.batch_size >1: 
+        #     out = self.batch_norm1(out)
+        # else:
+        #     out = self.norm1(out)
         out = F.relu(self.conv2(out))
-        if self.batch_size >1: 
-            out = self.batch_norm2(out)
-        else:
-            out = self.norm2(out)
+        # if self.batch_size >1: 
+        #     out = self.batch_norm2(out)
+        # else:
+        #     out = self.norm2(out)
         out = F.relu(self.conv3(out))
-        if self.batch_size >1: 
-            out = self.batch_norm3(out)
-        else:
-            out = self.norm3(out)
+        # if self.batch_size >1: 
+        #     out = self.batch_norm3(out)
+        # else:
+        #     out = self.norm3(out)
         out = F.relu(self.adaptive_pool(out))
         out = out.reshape(self.batch_size,1024)
         
@@ -344,12 +358,12 @@ class MDN(nn.Module):
         out = torch.mean(out)
         
         return out
-    
+
 class MDN_RNN(nn.Module):
 
     def __init__(self, input_size, output_size, mdn_units=512, hidden_size=256, num_mixs=5):
         super(MDN_RNN, self).__init__()
-
+        self.queue = deque(maxlen=5)
         self.hidden_size = hidden_size
         self.num_mixs = num_mixs
         self.input_size = input_size
@@ -358,15 +372,22 @@ class MDN_RNN(nn.Module):
         self.lstm = nn.LSTM(input_size, hidden_size, 1, batch_first=True)
         self.mdn = MDN(hidden_size, output_size, num_mixs, mdn_units)
 
-    def forward(self, x, state=None):
+    def forward(self, x):
         
         y = None
         x = x.unsqueeze(0) # batch first
-        if state is None:
-            y, state = self.lstm(x)
-        else:
-            y, state = self.lstm(x, state)
+        l = list(self.queue)
         
+        if len(l)>0:
+            y, state = self.lstm(x, )
+        else:
+            y, state = self.lstm(x)
+        #state = (hn, cn)
+        if len(self.queue)>self.queue.maxlen:
+            self.queue.pop()
+        #print("y",y,"state", state)
+        self.queue.append(state)
+
         pi, sigma, mu = self.mdn(y)
         
         return state, sigma, mu
@@ -375,11 +396,18 @@ class MDN_RNN(nn.Module):
         
         y = None
         x = x.unsqueeze(0) # batch first
-        if state is None:
-            y, state = self.lstm(x)
+        l = list(self.queue)
+        
+        if len(l)>0:
+            y, state = self.lstm(x, )
         else:
-            y, state = self.lstm(x, state)
-
+            y, state = self.lstm(x)
+        #state = (hn, cn)
+        if len(self.queue)>self.queue.maxlen:
+            self.queue.pop()
+        #print("y",y,"state", state)
+        self.queue.append(state)
+        
         return y, state
 # outputs, y_batch, mu, logvar
     def loss_function(self, out, y, mu, logvar):
