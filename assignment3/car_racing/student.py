@@ -28,6 +28,7 @@ class Policy(nn.Module):
         self.MDN_RNN = MDN_RNN(input_size = latent_dim, output_size=latent_dim)
         #self.MDN_RNN = MDRNN(latent_dim, 3, hidden_size, 10)
         self.C = nn.Linear(latent_dim + hidden_size, 3 )
+        self.a = [0,0,0]
 
     def forward(self, x):
         # TODO
@@ -48,14 +49,23 @@ class Policy(nn.Module):
 
         z = self.VAE.encode(state.float())      
         #print(list(z))
-        if first:
-            a = [0,0,0]
-        rolloutRNN = torch.concat((a, z), dim=1)
-        h = self.MDN_RNN.forward_lstm(list(z))
-        a = self.C(torch.tensor([z, h]))
-        torch.clip(a, min = -1, max = 1 )
+        def my_function():
+            if not hasattr(my_function, "is_first_call"):
+                my_function.is_first_call = True
+            else:
+                my_function.is_first_call = False
 
-        return a
+            if my_function.is_first_call:
+                self.a = [0,0,0]
+            else:
+                self.a = self.a
+            
+        rolloutRNN = torch.concat((self.a, z), dim=1)
+        h = self.MDN_RNN.forward_lstm(rolloutRNN)
+        self.a = self.C(torch.tensor([z, h]))
+        torch.clip(self.a, min = -1, max = 1 )
+
+        return self.a
 
     def train(self):
         # TODO
