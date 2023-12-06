@@ -17,7 +17,7 @@ class Policy(nn.Module):
         super(Policy, self).__init__()
         self.device = device
 
-        self.env = gym.make('CarRacing-v2', continuous=self.continuous, render_mode='human')
+        self.env = gym.make('CarRacing-v2', continuous=self.continuous)#, render_mode='human')
         self.env.reset()
         #TODO 
         latent_dim = 100
@@ -30,7 +30,7 @@ class Policy(nn.Module):
     def forward(self, x):
         # TODO
         z = self.VAE.encode(x)      
-        a = self.C(z, self.MDN_RNN.getHiddenState())
+        a = self.C(z, self.MDN_RNN.forward_lstm(z))
         a = torch.clip(a, min = -1, max = 1 )
         h = self.MDN_RNN(z, a, h)
 
@@ -38,9 +38,9 @@ class Policy(nn.Module):
     
     def act(self, state):
         # TODO
-        z = self.VAE.encode(state)      
-        a = self.C(z, self.MDN_RNN.getHiddenState())
-        a = torch.clip(a, min = -1, max = 1 )
+        z = self.VAE.encode(state.float())      
+        a = self.C(z, self.MDN_RNN.forward_lstm(torch.tensor(z)))
+        torch.clip(a, min = -1, max = 1 )
 
         return a
 
@@ -65,9 +65,9 @@ class Policy(nn.Module):
         rollout = torch.stack(rollout, dim=0)
         rollout = rollout.permute(0,1,3,2).permute(0,2,1,3)
 
-        optimizerVAE = torch.optim.Adam(self.VAE.parameters(), lr=9e-5)
+        optimizerVAE = torch.optim.Adam(self.VAE.parameters(), lr=5e-1)
         batch_sizeVAE = 32
-        num_epochsVAE = 100
+        num_epochsVAE = 150
 
         self.trainmodule(self.VAE, optimizerVAE, rollout.float(), batch_sizeVAE, num_epochsVAE)
 
@@ -80,9 +80,9 @@ class Policy(nn.Module):
 
         rolloutH = self.MDN_RNN.forward_lstm(rolloutRNN)
 
-        optimizerRNN = torch.optim.Adam(self.MDN_RNN.parameters(), lr=9e-4)
+        optimizerRNN = torch.optim.Adam(self.MDN_RNN.parameters(), lr=7e-4)
         batch_sizeRNN = 32
-        num_epochsRNN = 100
+        num_epochsRNN = 50
 
         self.trainmodule(self.MDN_RNN, optimizerRNN, rolloutRNN, batch_sizeRNN, num_epochsRNN)
 
@@ -107,7 +107,7 @@ class Policy(nn.Module):
                 rollout.append(observation)
                 observation = state
                 
-            optimizerVAE = torch.optim.Adam(self.VAE.parameters(), lr=0.01)
+            optimizerVAE = torch.optim.Adam(self.VAE.parameters(), lr=5e-7)
             batch_sizeVAE = 32
             num_epochsVAE = 100
 
@@ -115,7 +115,7 @@ class Policy(nn.Module):
 
             rolloutZ = []
             for _ in range(10000):
-                z = self.VAE.encode(rollout[2:4])
+                z = self.VAE.encode(rollout)
                 observation = self.VAE.encode(z)
                 rolloutZ.append(observation)
 
@@ -139,6 +139,7 @@ class Policy(nn.Module):
         return ret
 
     def trainmodule(self, network, optimizer, data, batch_size,  num_epochs):
+        torch.autograd.set_detect_anomaly(True)
         for epoch in range(num_epochs):
             for i in range(0, len(data), batch_size):
                 # Get batch
@@ -171,6 +172,8 @@ class VAE(nn.Module):
         self.conv1 = nn.Conv2d(in_channels=3, out_channels=16, kernel_size=3, stride=2, padding=1)
         self.conv2 = nn.Conv2d(in_channels=16, out_channels=32, kernel_size=3, stride=2, padding=1)
         self.conv3 = nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3, stride=2, padding=1)
+        self.batch_norm = nn.BatchNorm2d(64)
+        self.norm = nn.BatchNorm1d(64)
         self.adaptive_pool = nn.AdaptiveAvgPool2d((4, 4))
         
         # z
@@ -179,7 +182,7 @@ class VAE(nn.Module):
         
         # decoder
         # Assuming the input vector is 1024 elements
-        self.fc = nn.Linear(100, 6 * 6 * 256)  # Convert 1024 elements back to 4x4x64 tensor
+        self.fc = nn.Linear(latent_size, 6 * 6 * 256)  # Convert 1024 elements back to 4x4x64 tensor
 
         # Transposed convolutions
 
@@ -196,27 +199,37 @@ class VAE(nn.Module):
         return out, mu, logvar   
         
     def encode(self, x):
-        batch_size = x.shape[0]
+        self.batch_size = 1
+        if len(x.shape)>3:
+            self.batch_size = x.shape[0]
         
         out = F.relu(self.conv1(x))
         out = F.relu(self.conv2(out))
         out = F.relu(self.conv3(out))
+        if self.batch_size >1: 
+            out = self.batch_norm(out)
+        else:
+            out = self.norm(out)
         out = F.relu(self.adaptive_pool(out))
-        out = out.reshape(batch_size,1024)
+        out = out.reshape(self.batch_size,1024)
         
+        
+
         mu = self.mu(out)
         logvar = self.logvar(out)
         
+        #print("mu", mu, "\n logvar", logvar)
+
         return mu, logvar
         
     def decode(self, z):
-        batch_size = z.shape[0]
-        
+        #batch_size = z.shape[0]
+        #print("z",z)
         #print(z.shape)
         out = self.fc(z)
-        out = out.view(-1, 256, 6, 6)
+        out = out.view(self.batch_size, 256, 6, 6)
         # out = out.view(-1, 64, 4, 4)  # Reshape to 4x4x64 tensor
-
+        #print("out",out)
         # out = z.view(batch_size, self.latent_size, 1, 1)
         #print(out.shape)
 
@@ -229,10 +242,11 @@ class VAE(nn.Module):
         
         
     def latent(self, mu, logvar):
+        #print("logvar",logvar)
         sigma = torch.exp(0.5*logvar)
         eps = torch.randn_like(logvar).to(self.device)
         z = mu + eps*sigma
-        
+        #print("sigma",sigma)
         return z
     
     def obs_to_z(self, x):
@@ -247,9 +261,10 @@ class VAE(nn.Module):
         return out
     
     def loss_function(self, out, y, mu, logvar):
-        #BCE = F.binary_cross_entropy(out, y, reduction="sum")
+        #print("out",out, "\n y",y)
+        CE = F.cross_entropy(out, y)
         KL = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
-        return KL
+        return KL + CE
 
     def get_latent_size(self):
         
