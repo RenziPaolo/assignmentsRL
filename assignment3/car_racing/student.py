@@ -11,6 +11,8 @@ from torch.distributions.normal import Normal
 import cma
 from queue import Queue
 from collections import deque 
+import pygad.torchga
+import pygad
 
 class Policy(nn.Module):
     continuous = True # you can change this
@@ -19,16 +21,16 @@ class Policy(nn.Module):
         super(Policy, self).__init__()
         self.device = device
 
-        self.env = gym.make('CarRacing-v2', continuous=self.continuous)#, render_mode='human')
+        self.env = gym.make('CarRacing-v2', continuous=self.continuous, render_mode='human')
         self.env.reset()
         #TODO 
         latent_dim = 100
-        hidden_size = 5
-        self.VAE = VAE(latent_size = latent_dim)
-        self.MDN_RNN = MDN_RNN(input_size = latent_dim, output_size=latent_dim)
+        hidden_size = 256
+        self.VAE = VAE(latent_size = latent_dim).to(self.device)
+        self.MDN_RNN = MDN_RNN(input_size = latent_dim + 3, output_size=latent_dim).to(self.device)
         #self.MDN_RNN = MDRNN(latent_dim, 3, hidden_size, 10)
-        self.C = nn.Linear(latent_dim + hidden_size, 3 )
-        self.a = [0,0,0]
+        self.C = nn.Linear(in_features=latent_dim + hidden_size, out_features=3).to(self.device)
+        self.a = torch.tensor([0,0,0]).to(self.device)
 
     def forward(self, x):
         # TODO
@@ -41,13 +43,16 @@ class Policy(nn.Module):
     
     def act(self, state):
         # TODO
-# z = vae.encode(obs)
-# a = controller.action([z, h])
-# obs, reward, done = env.step(a)
-# cumulative_reward += reward
-# h = rnn.forward([a, z, h])
-
-        z = self.VAE.encode(state.float())      
+        # z = vae.encode(obs)
+        # a = controller.action([z, h])
+        # obs, reward, done = env.step(a)
+        # cumulative_reward += reward
+        # h = rnn.forward([a, z, h])
+        #print(state.shape)
+        mu, logvar = self.VAE.encode(state.float())
+        z = self.VAE.latent(mu, logvar)
+        z = z
+        
         #print(list(z))
         def my_function():
             if not hasattr(my_function, "is_first_call"):
@@ -56,99 +61,138 @@ class Policy(nn.Module):
                 my_function.is_first_call = False
 
             if my_function.is_first_call:
-                self.a = [0,0,0]
+                return torch.tensor([0,0,0]).to(self.device)
             else:
-                self.a = self.a
+                return self.a
+        
+        self.a = my_function()
+
+        self.a = self.a.unsqueeze(0)
             
-        rolloutRNN = torch.concat((self.a, z), dim=1)
-        h = self.MDN_RNN.forward_lstm(rolloutRNN)
-        self.a = self.C(torch.tensor([z, h]))
+        rolloutRNN = torch.concat((self.a, z), dim=1).to(self.device)
+        output, state = self.MDN_RNN.forward_lstm(rolloutRNN)
+
+        output = output.squeeze(0)
+        
+        self.a = self.C(torch.cat((z, output),dim=1).to(self.device)).to(self.device)
         torch.clip(self.a, min = -1, max = 1 )
 
-        return self.a
+        return self.a.cpu().float().squeeze().detach().numpy()
 
     def train(self):
         # TODO
         #first initialization / skip if load from file
         rollout = []
         rolloutA = []
-        
-        num_rolloutVAE = 32*10
+        rolloutR = []
+        num_rolloutVAE = 32*50
        
         for i in range(num_rolloutVAE):
            a = self.env.action_space.sample()
            observation, reward, terminated, truncated, info = self.env.step(a)
            observation = torch.from_numpy(observation/255)
-           
            rollout.append(observation)
            rolloutA.append(a)
+           rolloutR.append(reward)
            #if (i + 1) % (32*100) == 0:
            #    state, _ = self.env.reset()
         
-        rollout = torch.stack(rollout, dim=0)
+        rollout = torch.stack(rollout, dim=0).to(self.device)
         rollout = rollout.permute(0,1,3,2).permute(0,2,1,3)
 
-        optimizerVAE = torch.optim.Adam(self.VAE.parameters(), lr=1e-4)
+        optimizerVAE = torch.optim.Adam(self.VAE.parameters(), lr=5e-6)
         batch_sizeVAE = 32
-        num_epochsVAE = 10
+        num_epochsVAE = 200
 
-        self.trainmodule(self.VAE, optimizerVAE, rollout.float(), batch_sizeVAE, num_epochsVAE)
+        self.trainmodule(self.VAE.to(self.device), optimizerVAE, rollout.float().to(self.device), batch_sizeVAE, num_epochsVAE)
 
         mu, logvar = self.VAE.encode(rollout.float())
-        rolloutZ = self.VAE.latent(mu, logvar).detach()
+        rolloutZ = self.VAE.latent(mu, logvar).detach().to(self.device)
 
-        rolloutA = torch.tensor(np.array(rolloutA)).detach()
+        rolloutA = torch.tensor(np.array(rolloutA)).to(self.device).detach()
 
-        rolloutRNN = torch.concat((rolloutA, rolloutZ), dim=1)
+        
 
-        rolloutH = self.MDN_RNN.forward_lstm(rolloutRNN)
+        rolloutRNN = torch.concat((rolloutA.detach(), rolloutZ.detach()), dim=1).to(self.device).detach()
 
-        optimizerRNN = torch.optim.Adam(self.MDN_RNN.parameters(), lr=7e-4)
+        #rolloutH = self.MDN_RNN.forward_lstm(rolloutRNN).to(self.device)
+
+        optimizerRNN = torch.optim.Adam(self.MDN_RNN.parameters(), lr=5e-5)
         batch_sizeRNN = 32
         num_epochsRNN = 20
 
-        self.trainmodule(self.MDN_RNN, optimizerRNN, rolloutRNN, batch_sizeRNN, num_epochsRNN)
+        self.trainmodule(self.MDN_RNN.to(self.device), optimizerRNN, rolloutRNN.detach().to(self.device), batch_sizeRNN, num_epochsRNN)
 
         #MDN_RNN.train()
 
         # Example usage
         
-        for param in self.C.parameters():
-            param
-            #print(param)
+        param = sum(p.numel() for p in self.C.parameters())
+            
+        dr = discountedReward(rolloutR, 0.9)
+        r = Reward(self.env, self)
+        trainer = self.trainGA(param, self.env, self)
+        trainer.trainGA()
+        # print(CMAres)
+        # self.C.load_state_dict(CMAres)
 
-        cma = cma.CMAEvolutionStrategy(param.float().detach().numpy(), 1)
 
         #CMA-ES(C).train
-        for _ in range(10):
+        for _ in range(1):
             rollout = []
+            rolloutA = []
             state, _ = self.env.reset()
-            for _ in range(10000):
-                state = torch.tensor(state).permute(0,2,1).permute(1,0,2)
-                print(state.shape)
+            for _ in range(32*50):
+                state = torch.tensor(np.array(state)).unsqueeze(0)
+                if len(state.shape)==3:
+                    #96,96,3     96,3,96   3,96,96
+                    state = state.permute(0,2,1)
+                    #print("first",state.shape)
+                    # state = state.permute(1,0,2).to(self.device)
+                    # print("second",state.shape)
+                if len(state.shape) == 4:
+                    state = state.permute(0,1,3,2).permute(0,2,1,3).to(self.device)
+                    #print("after permute",state.shape)
+                
+                state = state.to(self.device)
                 a = self.act(state)
                 observation, reward, terminated, truncated, info = self.env.step(a)
-                rollout.append(observation/255)
-                observation = state
-                
-            optimizerVAE = torch.optim.Adam(self.VAE.parameters(), lr=5e-7)
+                state = observation
+                state = torch.tensor(state)
+                rollout.append(torch.from_numpy(observation/255))
+                rolloutA.append(a)
+                #if (i + 1) % (32*100) == 0:
+                #    state, _ = self.env.reset()
+            print(type(rollout[0]))
+            rollout = torch.stack(rollout, dim=0).to(self.device)
+            rollout = rollout.permute(0,1,3,2).permute(0,2,1,3)
+
+            optimizerVAE = torch.optim.Adam(self.VAE.parameters(), lr=1e-4)
             batch_sizeVAE = 32
             num_epochsVAE = 100
 
             self.trainmodule(self.VAE, optimizerVAE, rollout, batch_sizeVAE, num_epochsVAE)
 
-            rolloutZ = []
-            for _ in range(10000):
-                z = self.VAE.encode(rollout)
-                observation = self.VAE.encode(z)
-                rolloutZ.append(observation)
+            mu, logvar = self.VAE.encode(rollout.float())
+            rolloutZ = self.VAE.latent(mu, logvar).detach().to(self.device)
 
-            optimizerRNN = torch.optim.Adam(self.RNN.parameters(), lr=0.01)
-            batch_sizeRNN = 32
-            num_epochsRNN = 100
-
+            rolloutA = torch.tensor(np.array(rolloutA)).to(self.device).detach()
             
+            rolloutRNN = torch.concat((rolloutA.detach(), rolloutZ.detach()), dim=1).to(self.device).detach()
+
+            #rolloutH = self.MDN_RNN.forward_lstm(rolloutRNN).to(self.device)
+
+            optimizerRNN = torch.optim.Adam(self.MDN_RNN.parameters(), lr=7e-4)
+            batch_sizeRNN = 32
+            num_epochsRNN = 20
+
             self.trainmodule(self.MDN_RNN, optimizerRNN, rollout, batch_sizeRNN, num_epochsRNN)
+
+            for param in self.C.parameters():
+                param
+            
+            self.trainGA(param)
+
         return
 
     def save(self):
@@ -163,7 +207,7 @@ class Policy(nn.Module):
         return ret
 
     def trainmodule(self, network, optimizer, data, batch_size,  num_epochs):
-        torch.autograd.set_detect_anomaly(True)
+        #torch.autograd.set_detect_anomaly(True)
         for epoch in range(num_epochs):
             for i in range(0, len(data), batch_size):
                 # Get batch
@@ -176,7 +220,7 @@ class Policy(nn.Module):
                 loss = network.loss_function(outputs, y_batch, mu, logvar)
 
                 # Backward pass and optimization
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 optimizer.step()
 
@@ -184,6 +228,104 @@ class Policy(nn.Module):
             if (epoch + 1) % 10 == 0:
                 print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.4f}')
         return
+    class trainGA():
+        def __init__(self, params, env, model):
+            self.env = env
+            self.model = model
+            self.params = params
+
+        def trainGA(self):
+            self.env = gym.make('CarRacing-v2', continuous=True)
+            self.env.reset()
+            def fitness_func(gaclass, solution, sol_idx):
+                
+                model_weights_dict = pygad.torchga.model_weights_as_dict(model=self.model.C, weights_vector=solution)
+                self.model.C.load_state_dict(model_weights_dict)
+
+                # play game
+                observation = self.env.reset()
+                sum_reward = 0
+                done = False
+                while (not done) and (sum_reward < 1000):
+                    # env.render()
+                    print(observation)
+                    ob_tensor = torch.tensor(observation, dtype=torch.float)
+                    action = self.model.act(ob_tensor)
+                    observation_next, reward, done, info = self.env.step(action)
+                    observation = observation_next
+                    sum_reward += reward
+
+                return sum_reward
+
+
+            num_generations = 100 # Number of generations.
+            num_parents_mating = 10 # Number of solutions to be selected as parents in the mating pool.
+
+            sol_per_pop = 20 # Number of solutions in the population.
+            num_genes = self.params
+
+            last_fitness = 0
+            def on_generation(ga_instance):
+                global last_fitness
+                print(f"Generation = {ga_instance.generations_completed}")
+                print(f"Fitness    = {ga_instance.best_solution(pop_fitness=ga_instance.last_generation_fitness)[1]}")
+                last_fitness = ga_instance.best_solution(pop_fitness=ga_instance.last_generation_fitness)[1]
+                print(f"Change     = {ga_instance.best_solution(pop_fitness=ga_instance.last_generation_fitness)[1] - last_fitness}")
+
+            ga_instance = pygad.GA(num_generations=num_generations,
+                                num_parents_mating=num_parents_mating,
+                                sol_per_pop=sol_per_pop,
+                                num_genes=num_genes,
+                                fitness_func=fitness_func,
+                                on_generation=on_generation)
+
+            # Running the GA to optimize the parameters of the function.
+            ga_instance.run()
+
+            ga_instance.plot_fitness()
+
+            # Returning the details of the best solution.
+            solution, solution_fitness, solution_idx = ga_instance.best_solution(ga_instance.last_generation_fitness)
+            print(f"Parameters of the best solution : {solution}")
+            print(f"Fitness value of the best solution = {solution_fitness}")
+            print(f"Index of the best solution : {solution_idx}")
+
+            if ga_instance.best_solution_generation != -1:
+                print(f"Best fitness value reached after {ga_instance.best_solution_generation} generations.")
+
+            # Saving the GA instance.
+            filename = 'genetic' # The filename to which the instance is saved. The name is without extension.
+            ga_instance.save(filename=filename)
+
+            # Loading the saved GA instance.
+            loaded_ga_instance = pygad.load(filename=filename)
+            loaded_ga_instance.plot_fitness()
+
+class discountedReward():
+    def __init__(self, reward, gamma):
+        super().__init__()
+        self.reward = reward
+        self.gamma = gamma
+
+    def getDiscountedReward(self, x):
+        print("x:",x)
+        discountedRewards = []
+        i = 0
+        for r in self.reward:
+            discountedRewards.append(r*(self.gamma**i))
+            i +=1
+        return discountedRewards
+    
+class Reward():
+    def __init__(self, env, agent):
+        super().__init__()
+        self.env = env
+        self.agent = agent
+
+    def getReward(self, x):
+        observation, reward, terminated, truncated, info = self.env.step(x)
+        return -reward
+
 
 class VAE(nn.Module):
     
@@ -373,11 +515,11 @@ class MDN_RNN(nn.Module):
 
     def __init__(self, input_size, output_size, mdn_units=512, hidden_size=256, num_mixs=5):
         super(MDN_RNN, self).__init__()
-        self.queue = deque(maxlen=5)
         self.hidden_size = hidden_size
         self.num_mixs = num_mixs
         self.input_size = input_size
         self.output_size = output_size
+        self.state = None
         
         self.lstm = nn.LSTM(input_size, hidden_size, 1, batch_first=True)
         self.mdn = MDN(hidden_size, output_size, num_mixs, mdn_units)
@@ -386,17 +528,14 @@ class MDN_RNN(nn.Module):
         
         y = None
         x = x.unsqueeze(0) # batch first
-        l = list(self.queue)
         
-        if len(l)>0:
-            y, state = self.lstm(x, )
+        if self.state!=None:
+            y, state = self.lstm(x, (self.state[0].detach(), self.state[1].detach()))
         else:
             y, state = self.lstm(x)
-        #state = (hn, cn)
-        if len(self.queue)>self.queue.maxlen:
-            self.queue.pop()
+
         #print("y",y,"state", state)
-        self.queue.append(state)
+        self.state = state
 
         pi, sigma, mu = self.mdn(y)
         
@@ -406,20 +545,17 @@ class MDN_RNN(nn.Module):
         
         y = None
         x = x.unsqueeze(0) # batch first
-        l = list(self.queue)
         
-        if len(l)>0:
-            y, state = self.lstm(x, )
+        if self.state!=None:
+            y, state = self.lstm(x, (self.state[0].detach(), self.state[1].detach()))
         else:
             y, state = self.lstm(x)
-        #state = (hn, cn)
-        if len(self.queue)>self.queue.maxlen:
-            self.queue.pop()
+
         #print("y",y,"state", state)
-        self.queue.append(state)
+        self.state = state
         
         return y, state
-# outputs, y_batch, mu, logvar
+    # outputs, y_batch, mu, logvar
     def loss_function(self, out, y, mu, logvar):
         #BCE = F.binary_cross_entropy(out, y, reduction="sum")
         KL = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
