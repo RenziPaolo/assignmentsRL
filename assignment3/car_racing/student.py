@@ -249,6 +249,7 @@ class Policy(nn.Module):
                 terminated = False
                 truncated = False
                 observation = observation[0]
+                i=0
                 while (not (done or terminated or truncated)) and (sum_reward < 1000):
                     self.env.render()
                     
@@ -257,10 +258,10 @@ class Policy(nn.Module):
                     action = self.model.act(ob_tensor)
                     observation_next, reward, terminated, truncated, info = self.env.step(action)
                     observation = observation_next
+                    i +=1
                     if reward < 0:
                         reward = reward*2
-                    sum_reward += reward
-
+                    sum_reward += reward * (0.9**i)
                 return sum_reward
 
 
