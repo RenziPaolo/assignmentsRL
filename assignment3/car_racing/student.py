@@ -63,13 +63,13 @@ class Policy(nn.Module):
                 my_function.is_first_call = False
 
             if my_function.is_first_call:
-                return  self.C(torch.cat((z, torch.zeros((1,256))),dim=1).to(self.device)).to(self.device)
+                return  self.C(torch.cat((z, torch.zeros((1,256)).to(self.device)),dim=1).to(self.device)).to(self.device)
             else:
                 return self.a
         
         self.a = my_function()
-
-        self.a = self.a.unsqueeze(0)
+        if self.a.dim==2:
+            self.a = self.a.unsqueeze(0)
             
         rolloutRNN = torch.concat((self.a, z), dim=1).to(self.device)
         output, state = self.MDN_RNN.forward_lstm(rolloutRNN)
@@ -256,7 +256,7 @@ class Policy(nn.Module):
                 truncated = False
                 observation = observation[0]
                 i=0
-                while (not (done or terminated or truncated)) and (sum_reward < 2000):
+                while (not (done or terminated or truncated)) and (sum_reward < 1000):
                     self.env.render()
                     
                     observation = observation
@@ -265,7 +265,6 @@ class Policy(nn.Module):
                     observation_next, reward, terminated, truncated, info = self.env.step(action)
                     observation = observation_next
                     i +=1
-                    print("\nsum_reward:", sum_reward)
                     if reward < 0:
                         reward = reward*2
                     sum_reward += reward * (1.001**i)
