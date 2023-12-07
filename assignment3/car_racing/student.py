@@ -85,7 +85,7 @@ class Policy(nn.Module):
         rollout = []
         rolloutA = []
         rolloutR = []
-        num_rolloutVAE = 32*50
+        num_rolloutVAE = 32*10
        
         for i in range(num_rolloutVAE):
            a = self.env.action_space.sample()
@@ -102,7 +102,7 @@ class Policy(nn.Module):
 
         optimizerVAE = torch.optim.Adam(self.VAE.parameters(), lr=5e-6)
         batch_sizeVAE = 32
-        num_epochsVAE = 200
+        num_epochsVAE = 100
 
         self.trainmodule(self.VAE.to(self.device), optimizerVAE, rollout.float().to(self.device), batch_sizeVAE, num_epochsVAE)
 
@@ -235,7 +235,7 @@ class Policy(nn.Module):
             self.params = params
 
         def trainGA(self):
-            self.env = gym.make('CarRacing-v2', continuous=True)
+            self.env = gym.make('CarRacing-v2', continuous=True, render_mode='human')
             self.env.reset()
             def fitness_func(gaclass, solution, sol_idx):
                 
@@ -246,12 +246,16 @@ class Policy(nn.Module):
                 observation = self.env.reset()
                 sum_reward = 0
                 done = False
-                while (not done) and (sum_reward < 1000):
-                    # env.render()
-                    print(observation)
-                    ob_tensor = torch.tensor(observation, dtype=torch.float)
+                terminated = False
+                truncated = False
+                observation = observation[0]
+                while (not (done or terminated or truncated)) and (sum_reward < 1000):
+                    self.env.render()
+                    
+                    observation = observation
+                    ob_tensor = torch.tensor(observation/255, dtype=torch.float).unsqueeze(0).permute(0,1,3,2).permute(0,2,1,3)
                     action = self.model.act(ob_tensor)
-                    observation_next, reward, done, info = self.env.step(action)
+                    observation_next, reward, terminated, truncated, info = self.env.step(action)
                     observation = observation_next
                     sum_reward += reward
 
