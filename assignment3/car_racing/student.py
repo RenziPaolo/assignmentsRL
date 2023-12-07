@@ -85,7 +85,7 @@ class Policy(nn.Module):
         rollout = []
         rolloutA = []
         rolloutR = []
-        num_rolloutVAE = 32*10
+        num_rolloutVAE = 32*50
        
         for i in range(num_rolloutVAE):
            a = self.env.action_space.sample()
@@ -102,7 +102,7 @@ class Policy(nn.Module):
 
         optimizerVAE = torch.optim.Adam(self.VAE.parameters(), lr=5e-6)
         batch_sizeVAE = 32
-        num_epochsVAE = 100
+        num_epochsVAE = 200
 
         self.trainmodule(self.VAE.to(self.device), optimizerVAE, rollout.float().to(self.device), batch_sizeVAE, num_epochsVAE)
 
@@ -233,6 +233,7 @@ class Policy(nn.Module):
             self.env = env
             self.model = model
             self.params = params
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
         def trainGA(self):
             self.env = gym.make('CarRacing-v2', continuous=True, render_mode='human')
@@ -254,7 +255,7 @@ class Policy(nn.Module):
                     self.env.render()
                     
                     observation = observation
-                    ob_tensor = torch.tensor(observation/255, dtype=torch.float).unsqueeze(0).permute(0,1,3,2).permute(0,2,1,3)
+                    ob_tensor = torch.tensor(observation/255, dtype=torch.float).unsqueeze(0).permute(0,1,3,2).permute(0,2,1,3).to(self.device)
                     action = self.model.act(ob_tensor)
                     observation_next, reward, terminated, truncated, info = self.env.step(action)
                     observation = observation_next
