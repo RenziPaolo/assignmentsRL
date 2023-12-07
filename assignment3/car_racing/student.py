@@ -13,6 +13,7 @@ from queue import Queue
 from collections import deque 
 import pygad.torchga
 import pygad
+import concurrent.futures
 
 class Policy(nn.Module):
     continuous = True # you can change this
@@ -29,7 +30,8 @@ class Policy(nn.Module):
         self.VAE = VAE(latent_size = latent_dim).to(self.device)
         self.MDN_RNN = MDN_RNN(input_size = latent_dim + 3, output_size=latent_dim).to(self.device)
         #self.MDN_RNN = MDRNN(latent_dim, 3, hidden_size, 10)
-        self.C = nn.Linear(in_features=latent_dim + hidden_size, out_features=3).to(self.device)
+        self.Clinear = nn.Linear(in_features=latent_dim + hidden_size, out_features=3).to(self.device)
+        self.C = LearnableClippingLayer(in_features=latent_dim + hidden_size, out_features=3).to(self.device)
         self.a = torch.tensor([0,0,0]).to(self.device)
 
     def forward(self, x):
@@ -61,7 +63,7 @@ class Policy(nn.Module):
                 my_function.is_first_call = False
 
             if my_function.is_first_call:
-                return torch.tensor([0,0,0]).to(self.device)
+                return  self.C(torch.cat((z, torch.zeros((1,256))),dim=1).to(self.device)).to(self.device)
             else:
                 return self.a
         
@@ -75,6 +77,7 @@ class Policy(nn.Module):
         output = output.squeeze(0)
         
         self.a = self.C(torch.cat((z, output),dim=1).to(self.device)).to(self.device)
+        #print(self.a)
         torch.clip(self.a, min = -1, max = 1 )
 
         return self.a.cpu().float().squeeze().detach().numpy()
@@ -100,11 +103,12 @@ class Policy(nn.Module):
         rollout = torch.stack(rollout, dim=0).to(self.device)
         rollout = rollout.permute(0,1,3,2).permute(0,2,1,3)
 
-        optimizerVAE = torch.optim.Adam(self.VAE.parameters(), lr=5e-6)
-        batch_sizeVAE = 32
+        optimizerVAE = torch.optim.Adam(self.VAE.parameters(), lr=1e-5)
+        schedulerVAE = torch.optim.lr_scheduler.StepLR(optimizerVAE, step_size=10, gamma=0.8)
+        batch_sizeVAE = 64
         num_epochsVAE = 200
 
-        self.trainmodule(self.VAE.to(self.device), optimizerVAE, rollout.float().to(self.device), batch_sizeVAE, num_epochsVAE)
+        self.trainmodule(self.VAE.to(self.device), optimizerVAE, rollout.float().to(self.device), batch_sizeVAE, num_epochsVAE, schedulerVAE)
 
         mu, logvar = self.VAE.encode(rollout.float())
         rolloutZ = self.VAE.latent(mu, logvar).detach().to(self.device)
@@ -117,20 +121,19 @@ class Policy(nn.Module):
 
         #rolloutH = self.MDN_RNN.forward_lstm(rolloutRNN).to(self.device)
 
-        optimizerRNN = torch.optim.Adam(self.MDN_RNN.parameters(), lr=5e-5)
+        optimizerRNN = torch.optim.Adam(self.MDN_RNN.parameters(), lr=2.5e-5)
+        schedulerRNN = torch.optim.lr_scheduler.StepLR(optimizerRNN, step_size=1000, gamma=1)
         batch_sizeRNN = 32
         num_epochsRNN = 20
 
-        self.trainmodule(self.MDN_RNN.to(self.device), optimizerRNN, rolloutRNN.detach().to(self.device), batch_sizeRNN, num_epochsRNN)
+        self.trainmodule(self.MDN_RNN.to(self.device), optimizerRNN, rolloutRNN.detach().to(self.device), batch_sizeRNN, num_epochsRNN, schedulerRNN)
 
         #MDN_RNN.train()
 
         # Example usage
         
         param = sum(p.numel() for p in self.C.parameters())
-            
-        dr = discountedReward(rolloutR, 0.9)
-        r = Reward(self.env, self)
+
         trainer = self.trainGA(param, self.env, self)
         trainer.trainGA()
         # print(CMAres)
@@ -206,7 +209,7 @@ class Policy(nn.Module):
         ret.device = device
         return ret
 
-    def trainmodule(self, network, optimizer, data, batch_size,  num_epochs):
+    def trainmodule(self, network, optimizer, data, batch_size,  num_epochs, scheduler):
         #torch.autograd.set_detect_anomaly(True)
         for epoch in range(num_epochs):
             for i in range(0, len(data), batch_size):
@@ -223,6 +226,8 @@ class Policy(nn.Module):
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 optimizer.step()
+
+                #scheduler.step()
 
             # Print the loss every 10 epochs
             if (epoch + 1) % 10 == 0:
@@ -251,7 +256,7 @@ class Policy(nn.Module):
                 truncated = False
                 observation = observation[0]
                 i=0
-                while (not (done or terminated or truncated)) and (sum_reward < 1000):
+                while (not (done or terminated or truncated)) and (sum_reward < 2000):
                     self.env.render()
                     
                     observation = observation
@@ -260,14 +265,15 @@ class Policy(nn.Module):
                     observation_next, reward, terminated, truncated, info = self.env.step(action)
                     observation = observation_next
                     i +=1
+                    print("\nsum_reward:", sum_reward)
                     if reward < 0:
                         reward = reward*2
-                    sum_reward += reward * (0.9**i)
+                    sum_reward += reward * (1.001**i)
                 return sum_reward
 
 
-            num_generations = 100 # Number of generations.
-            num_parents_mating = 10 # Number of solutions to be selected as parents in the mating pool.
+            num_generations = 10 # Number of generations.
+            num_parents_mating = 5 # Number of solutions to be selected as parents in the mating pool.
 
             sol_per_pop = 20 # Number of solutions in the population.
             num_genes = self.params
@@ -286,9 +292,15 @@ class Policy(nn.Module):
                                 num_genes=num_genes,
                                 fitness_func=fitness_func,
                                 on_generation=on_generation)
+            def run_ga_instance(ga_instance):
+                # Running the GA to optimize the parameters of the function.
+                ga_instance.run()
 
-            # Running the GA to optimize the parameters of the function.
             ga_instance.run()
+
+            # with concurrent.futures.ThreadPoolExecutor() as executor:
+            #     future = executor.submit(run_ga_instance, ga_instance)
+            #     concurrent.futures.wait([future])
 
             ga_instance.plot_fitness()
 
@@ -309,31 +321,16 @@ class Policy(nn.Module):
             loaded_ga_instance = pygad.load(filename=filename)
             loaded_ga_instance.plot_fitness()
 
-class discountedReward():
-    def __init__(self, reward, gamma):
-        super().__init__()
-        self.reward = reward
-        self.gamma = gamma
+class LearnableClippingLayer(nn.Module):
+    def __init__(self, in_features, out_features):
+        super(LearnableClippingLayer, self).__init__()
+        self.linear = nn.Linear(in_features, out_features)
+        self.scale = nn.Parameter(torch.Tensor([1.0, -1.0, -1.0]))
 
-    def getDiscountedReward(self, x):
-        print("x:",x)
-        discountedRewards = []
-        i = 0
-        for r in self.reward:
-            discountedRewards.append(r*(self.gamma**i))
-            i +=1
-        return discountedRewards
-    
-class Reward():
-    def __init__(self, env, agent):
-        super().__init__()
-        self.env = env
-        self.agent = agent
-
-    def getReward(self, x):
-        observation, reward, terminated, truncated, info = self.env.step(x)
-        return -reward
-
+    def forward(self, x):
+        x = self.linear(x)
+        x = self.scale * torch.tanh(x)
+        return x
 
 class VAE(nn.Module):
     
