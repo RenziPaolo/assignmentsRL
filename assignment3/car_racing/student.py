@@ -257,6 +257,8 @@ class Policy(nn.Module):
                     action = self.model.act(ob_tensor)
                     observation_next, reward, terminated, truncated, info = self.env.step(action)
                     observation = observation_next
+                    if reward < 0:
+                        reward = reward*2
                     sum_reward += reward
 
                 return sum_reward
