@@ -182,10 +182,7 @@ class Policy(nn.Module):
 
             self.trainmodule(self.MDN_RNN.to(self.device), optimizerRNN, rolloutRNN.detach().to(self.device), batch_sizeRNN, num_epochsRNN, schedulerRNN)
 
-            for param in self.C.parameters():
-                param
-            
-            self.trainGA(param)
+            trainer.trainGA(10)
 
         return
 
