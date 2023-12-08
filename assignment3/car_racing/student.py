@@ -135,7 +135,7 @@ class Policy(nn.Module):
         param = sum(p.numel() for p in self.C.parameters())
 
         trainer = self.trainGA(param, self.env, self)
-        trainer.trainGA()
+        trainer.trainGA(5)
         # print(CMAres)
         # self.C.load_state_dict(CMAres)
 
@@ -182,10 +182,10 @@ class Policy(nn.Module):
 
             self.trainmodule(self.MDN_RNN.to(self.device), optimizerRNN, rolloutRNN.detach().to(self.device), batch_sizeRNN, num_epochsRNN, schedulerRNN)
 
-            trainer.trainGA()
-            # print(CMAres)
-            # self.C.load_state_dict(CMAres)
-
+            for param in self.C.parameters():
+                param
+            
+            self.trainGA(param)
 
         return
 
@@ -231,7 +231,7 @@ class Policy(nn.Module):
             self.params = params
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-        def trainGA(self):
+        def trainGA(self, num_generations):
             self.env = gym.make('CarRacing-v2', continuous=True, render_mode='human')
             self.env.reset()
             def fitness_func(gaclass, solution, sol_idx):
@@ -262,7 +262,7 @@ class Policy(nn.Module):
                 return sum_reward
 
 
-            num_generations = 10 # Number of generations.
+            num_generations = num_generations # Number of generations.
             num_parents_mating = 5 # Number of solutions to be selected as parents in the mating pool.
 
             sol_per_pop = 20 # Number of solutions in the population.
@@ -275,13 +275,17 @@ class Policy(nn.Module):
                 print(f"Fitness    = {ga_instance.best_solution(pop_fitness=ga_instance.last_generation_fitness)[1]}")
                 last_fitness = ga_instance.best_solution(pop_fitness=ga_instance.last_generation_fitness)[1]
                 print(f"Change     = {ga_instance.best_solution(pop_fitness=ga_instance.last_generation_fitness)[1] - last_fitness}")
+                self.save()
 
             ga_instance = pygad.GA(num_generations=num_generations,
                                 num_parents_mating=num_parents_mating,
                                 sol_per_pop=sol_per_pop,
                                 num_genes=num_genes,
                                 fitness_func=fitness_func,
-                                on_generation=on_generation)
+                                on_generation=on_generation,
+                                mutation_type="adaptive",
+                                crossover_type="Scattered",
+                                parent_selection_type="rank")
             def run_ga_instance(ga_instance):
                 # Running the GA to optimize the parameters of the function.
                 ga_instance.run()
