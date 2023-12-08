@@ -166,21 +166,30 @@ class Policy(nn.Module):
                 rolloutA.append(a)
                 #if (i + 1) % (32*100) == 0:
                 #    state, _ = self.env.reset()
+            print(type(rollout[0]))
             rollout = torch.stack(rollout, dim=0).to(self.device)
             rollout = rollout.permute(0,1,3,2).permute(0,2,1,3)
 
-            self.trainmodule(self.VAE.to(self.device), optimizerVAE, rollout.float().to(self.device), batch_sizeVAE, num_epochsVAE, schedulerVAE)
+            optimizerVAE = torch.optim.Adam(self.VAE.parameters(), lr=1e-4)
+            batch_sizeVAE = 32
+            num_epochsVAE = 200
+
+            self.trainmodule(self.VAE, optimizerVAE, rollout.float(), batch_sizeVAE, num_epochsVAE)
 
             mu, logvar = self.VAE.encode(rollout.float())
             rolloutZ = self.VAE.latent(mu, logvar).detach().to(self.device)
 
             rolloutA = torch.tensor(np.array(rolloutA)).to(self.device).detach()
-
+            
             rolloutRNN = torch.concat((rolloutA.detach(), rolloutZ.detach()), dim=1).to(self.device).detach()
 
             #rolloutH = self.MDN_RNN.forward_lstm(rolloutRNN).to(self.device)
 
-            self.trainmodule(self.MDN_RNN.to(self.device), optimizerRNN, rolloutRNN.detach().to(self.device), batch_sizeRNN, num_epochsRNN, schedulerRNN)
+            optimizerRNN = torch.optim.Adam(self.MDN_RNN.parameters(), lr=7e-4)
+            batch_sizeRNN = 32
+            num_epochsRNN = 20
+
+            self.trainmodule(self.MDN_RNN, optimizerRNN, rollout, batch_sizeRNN, num_epochsRNN)
 
             trainer.trainGA(10)
 
@@ -260,7 +269,7 @@ class Policy(nn.Module):
 
 
             num_generations = num_generations # Number of generations.
-            num_parents_mating = 5 # Number of solutions to be selected as parents in the mating pool.
+            num_parents_mating = 3 # Number of solutions to be selected as parents in the mating pool.
 
             sol_per_pop = 20 # Number of solutions in the population.
             num_genes = self.params
@@ -272,7 +281,6 @@ class Policy(nn.Module):
                 print(f"Fitness    = {ga_instance.best_solution(pop_fitness=ga_instance.last_generation_fitness)[1]}")
                 last_fitness = ga_instance.best_solution(pop_fitness=ga_instance.last_generation_fitness)[1]
                 print(f"Change     = {ga_instance.best_solution(pop_fitness=ga_instance.last_generation_fitness)[1] - last_fitness}")
-                self.save()
 
             ga_instance = pygad.GA(num_generations=num_generations,
                                 num_parents_mating=num_parents_mating,
@@ -282,7 +290,8 @@ class Policy(nn.Module):
                                 on_generation=on_generation,
                                 mutation_type="adaptive",
                                 crossover_type="Scattered",
-                                parent_selection_type="rank")
+                                parent_selection_type="rank",
+                                mutation_percent_genes =(70,30))
             def run_ga_instance(ga_instance):
                 # Running the GA to optimize the parameters of the function.
                 ga_instance.run()
@@ -293,7 +302,7 @@ class Policy(nn.Module):
             #     future = executor.submit(run_ga_instance, ga_instance)
             #     concurrent.futures.wait([future])
 
-            ga_instance.plot_fitness()
+            #ga_instance.plot_fitness()
 
             # Returning the details of the best solution.
             solution, solution_fitness, solution_idx = ga_instance.best_solution(ga_instance.last_generation_fitness)
@@ -306,7 +315,7 @@ class Policy(nn.Module):
 
             # Saving the GA instance.
             filename = 'genetic' # The filename to which the instance is saved. The name is without extension.
-            ga_instance.save(filename=filename)
+            self.model.save()
 
             # Loading the saved GA instance.
             loaded_ga_instance = pygad.load(filename=filename)
