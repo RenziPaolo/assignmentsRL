@@ -2,18 +2,10 @@ import gymnasium as gym
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.distributions as D
 import numpy as np
-from torch import Tensor, List
-from torch.utils.data import Dataset
-import math
-from torch.distributions.normal import Normal
-import cma
-from queue import Queue
-from collections import deque 
 import pygad.torchga
 import pygad
-import concurrent.futures
+#from multiprocessing import Lock
 
 class Policy(nn.Module):
     continuous = True # you can change this
@@ -53,7 +45,6 @@ class Policy(nn.Module):
         #print(state.shape)
         mu, logvar = self.VAE.encode(state.float())
         z = self.VAE.latent(mu, logvar)
-        z = z
         
         #print(list(z))
         def my_function():
@@ -90,7 +81,7 @@ class Policy(nn.Module):
         rolloutR = []
         num_rolloutVAE = 32*50
        
-        for i in range(num_rolloutVAE):
+        for _ in range(num_rolloutVAE):
            a = self.env.action_space.sample()
            observation, reward, terminated, truncated, info = self.env.step(a)
            observation = torch.from_numpy(observation/255)
@@ -170,27 +161,23 @@ class Policy(nn.Module):
             rollout = torch.stack(rollout, dim=0).to(self.device)
             rollout = rollout.permute(0,1,3,2).permute(0,2,1,3)
 
-            optimizerVAE = torch.optim.Adam(self.VAE.parameters(), lr=1e-4)
-            batch_sizeVAE = 32
-            num_epochsVAE = 200
-
-            self.trainmodule(self.VAE, optimizerVAE, rollout.float(), batch_sizeVAE, num_epochsVAE)
+            self.trainmodule(self.VAE.to(self.device), optimizerVAE, rollout.float().to(self.device), batch_sizeVAE, num_epochsVAE, schedulerVAE)
 
             mu, logvar = self.VAE.encode(rollout.float())
             rolloutZ = self.VAE.latent(mu, logvar).detach().to(self.device)
 
             rolloutA = torch.tensor(np.array(rolloutA)).to(self.device).detach()
-            
+
             rolloutRNN = torch.concat((rolloutA.detach(), rolloutZ.detach()), dim=1).to(self.device).detach()
 
             #rolloutH = self.MDN_RNN.forward_lstm(rolloutRNN).to(self.device)
 
-            optimizerRNN = torch.optim.Adam(self.MDN_RNN.parameters(), lr=7e-4)
-            batch_sizeRNN = 32
-            num_epochsRNN = 20
+            self.trainmodule(self.MDN_RNN.to(self.device), optimizerRNN, rolloutRNN.detach().to(self.device), batch_sizeRNN, num_epochsRNN, schedulerRNN)
 
-            self.trainmodule(self.MDN_RNN, optimizerRNN, rollout, batch_sizeRNN, num_epochsRNN)
+            #MDN_RNN.train()
 
+            # Example usage
+            
             trainer.trainGA(10)
 
         return
@@ -238,40 +225,43 @@ class Policy(nn.Module):
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
         def trainGA(self, num_generations):
-            self.env = gym.make('CarRacing-v2', continuous=True, render_mode='human')
-            self.env.reset()
-            def fitness_func(gaclass, solution, sol_idx):
-                
-                model_weights_dict = pygad.torchga.model_weights_as_dict(model=self.model.C, weights_vector=solution)
-                self.model.C.load_state_dict(model_weights_dict)
+            #env_lock = Lock()
 
-                # play game
-                observation = self.env.reset()
-                sum_reward = 0
-                done = False
-                terminated = False
-                truncated = False
-                observation = observation[0]
-                i=0
-                while (not (done or terminated or truncated)) and (sum_reward < 1000):
-                    self.env.render()
-                    
-                    observation = observation
-                    ob_tensor = torch.tensor(observation/255, dtype=torch.float).unsqueeze(0).permute(0,1,3,2).permute(0,2,1,3).to(self.device)
-                    action = self.model.act(ob_tensor)
-                    observation_next, reward, terminated, truncated, info = self.env.step(action)
-                    observation = observation_next
-                    i +=1
-                    if reward < 0:
-                        reward = reward*2
-                    sum_reward += reward * (1.001**i)
-                return sum_reward
+            def fitness_func(gaclass, solution, sol_idx):
+                #with env_lock:
+                    env = gym.make('CarRacing-v2', continuous=True)#, render_mode='state_pixels')
+                    env.reset()
+                    model_weights_dict = pygad.torchga.model_weights_as_dict(model=self.model.C, weights_vector=solution)
+                    self.model.C.load_state_dict(model_weights_dict)
+
+                    # play game
+                    observation = env.reset()
+                    sum_reward = 0
+                    done = False
+                    terminated = False
+                    truncated = False
+                    observation = observation[0]
+                    i=0
+                    while (not (done or terminated or truncated)) and (sum_reward < 1000):
+                        env.render()
+                        
+                        observation = observation
+                        ob_tensor = torch.tensor(observation/255, dtype=torch.float).unsqueeze(0).permute(0,1,3,2).permute(0,2,1,3).to(self.device)
+                        action = self.model.act(ob_tensor)
+                        observation_next, reward, terminated, truncated, info = env.step(action)
+                        observation = observation_next
+                        i +=1
+                        if reward < 0:
+                            reward = reward*2
+                        sum_reward += reward * (1.001**i)
+                    print(sum_reward)
+                    return sum_reward
 
 
             num_generations = num_generations # Number of generations.
-            num_parents_mating = 3 # Number of solutions to be selected as parents in the mating pool.
+            num_parents_mating = 10 # Number of solutions to be selected as parents in the mating pool.
 
-            sol_per_pop = 20 # Number of solutions in the population.
+            sol_per_pop = 18 # Number of solutions in the population.
             num_genes = self.params
 
             last_fitness = 0
@@ -282,6 +272,39 @@ class Policy(nn.Module):
                 last_fitness = ga_instance.best_solution(pop_fitness=ga_instance.last_generation_fitness)[1]
                 print(f"Change     = {ga_instance.best_solution(pop_fitness=ga_instance.last_generation_fitness)[1] - last_fitness}")
 
+            def blend_crossover(parents, offspring_size, ga_instance):
+                """
+                Blend Crossover (Simulated Binary Crossover) for continuous spaces.
+
+                Parameters:
+                - parents (numpy.ndarray): Parent solutions.
+                - offspring_size (tuple): Size of the offspring.
+                - alpha (float): Crossover control parameter.
+
+                Returns:
+                - offspring (numpy.ndarray): Offspring solutions.
+                """
+                alpha=0.1
+                offspring = []
+                idx = 0
+
+                while len(offspring) < offspring_size[0]:
+                    parent1 = parents[idx % parents.shape[0], :].copy()
+                    parent2 = parents[(idx + 1) % parents.shape[0], :].copy()
+
+                    rand_values = np.random.uniform(-alpha, 1 + alpha, size=len(parent1))
+
+                    # Perform blend crossover
+                    child1 = 0.5 * ((1 + alpha) * parent1 + (1 - alpha) * parent2 + rand_values)
+                    child2 = 0.5 * ((1 + alpha) * parent2 + (1 - alpha) * parent1 + rand_values)
+
+                    offspring.append(child1)
+                    offspring.append(child2)
+
+                    idx += 2
+
+                return np.array(offspring)
+
             ga_instance = pygad.GA(num_generations=num_generations,
                                 num_parents_mating=num_parents_mating,
                                 sol_per_pop=sol_per_pop,
@@ -289,12 +312,12 @@ class Policy(nn.Module):
                                 fitness_func=fitness_func,
                                 on_generation=on_generation,
                                 mutation_type="adaptive",
-                                crossover_type="Scattered",
+                                keep_elitism=2,
+                                crossover_type=blend_crossover,
                                 parent_selection_type="rank",
-                                mutation_percent_genes =(70,30))
-            def run_ga_instance(ga_instance):
-                # Running the GA to optimize the parameters of the function.
-                ga_instance.run()
+                                mutation_percent_genes =(50,5),
+                                parallel_processing=["thread", 4]
+                                )
 
             ga_instance.run()
 
@@ -318,8 +341,8 @@ class Policy(nn.Module):
             self.model.save()
 
             # Loading the saved GA instance.
-            loaded_ga_instance = pygad.load(filename=filename)
-            loaded_ga_instance.plot_fitness()
+            #loaded_ga_instance = pygad.load(filename=filename)
+            #loaded_ga_instance.plot_fitness()
 
 class LearnableClippingLayer(nn.Module):
     def __init__(self, in_features, out_features):
