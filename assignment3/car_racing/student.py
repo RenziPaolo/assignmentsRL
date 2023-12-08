@@ -161,6 +161,8 @@ class Policy(nn.Module):
             rollout = torch.stack(rollout, dim=0).to(self.device)
             rollout = rollout.permute(0,1,3,2).permute(0,2,1,3)
 
+            optimizerVAE = torch.optim.Adam(self.VAE.parameters(), lr=5e-7)
+
             self.trainmodule(self.VAE.to(self.device), optimizerVAE, rollout.float().to(self.device), batch_sizeVAE, num_epochsVAE, schedulerVAE)
 
             mu, logvar = self.VAE.encode(rollout.float())
@@ -223,6 +225,7 @@ class Policy(nn.Module):
             self.model = model
             self.params = params
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self.last_fitness = 0
 
         def trainGA(self, num_generations):
             #env_lock = Lock()
@@ -259,18 +262,17 @@ class Policy(nn.Module):
 
 
             num_generations = num_generations # Number of generations.
-            num_parents_mating = 10 # Number of solutions to be selected as parents in the mating pool.
+            num_parents_mating = 20 # Number of solutions to be selected as parents in the mating pool.
 
-            sol_per_pop = 18 # Number of solutions in the population.
+            sol_per_pop = 22 # Number of solutions in the population.
             num_genes = self.params
 
-            last_fitness = 0
+            
             def on_generation(ga_instance):
-                global last_fitness
                 print(f"Generation = {ga_instance.generations_completed}")
                 print(f"Fitness    = {ga_instance.best_solution(pop_fitness=ga_instance.last_generation_fitness)[1]}")
-                last_fitness = ga_instance.best_solution(pop_fitness=ga_instance.last_generation_fitness)[1]
-                print(f"Change     = {ga_instance.best_solution(pop_fitness=ga_instance.last_generation_fitness)[1] - last_fitness}")
+                print(f"Change     = {ga_instance.best_solution(pop_fitness=ga_instance.last_generation_fitness)[1] - self.last_fitness}")
+                self.last_fitness = ga_instance.best_solution(pop_fitness=ga_instance.last_generation_fitness)[1]
 
             def blend_crossover(parents, offspring_size, ga_instance):
                 """
@@ -284,7 +286,7 @@ class Policy(nn.Module):
                 Returns:
                 - offspring (numpy.ndarray): Offspring solutions.
                 """
-                alpha=0.1
+                alpha=0.25
                 offspring = []
                 idx = 0
 
@@ -292,7 +294,7 @@ class Policy(nn.Module):
                     parent1 = parents[idx % parents.shape[0], :].copy()
                     parent2 = parents[(idx + 1) % parents.shape[0], :].copy()
 
-                    rand_values = np.random.uniform(-alpha, 1 + alpha, size=len(parent1))
+                    rand_values = np.random.uniform(-alpha-0.25, alpha+0.25, size=len(parent1))
 
                     # Perform blend crossover
                     child1 = 0.5 * ((1 + alpha) * parent1 + (1 - alpha) * parent2 + rand_values)
@@ -315,8 +317,8 @@ class Policy(nn.Module):
                                 keep_elitism=2,
                                 crossover_type=blend_crossover,
                                 parent_selection_type="rank",
-                                mutation_percent_genes =(50,5),
-                                parallel_processing=["thread", 4]
+                                mutation_percent_genes =(30,5),
+                                parallel_processing=["thread", 6]
                                 )
 
             ga_instance.run()
@@ -337,7 +339,8 @@ class Policy(nn.Module):
                 print(f"Best fitness value reached after {ga_instance.best_solution_generation} generations.")
 
             # Saving the GA instance.
-            filename = 'genetic' # The filename to which the instance is saved. The name is without extension.
+            model_weights_dict = pygad.torchga.model_weights_as_dict(model=self.model.C, weights_vector=solution)
+            self.model.C.load_state_dict(model_weights_dict)
             self.model.save()
 
             # Loading the saved GA instance.
