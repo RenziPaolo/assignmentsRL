@@ -14,3 +14,4 @@ assignment2/.vscode/extensions.json
 assignment3/.venv
 assignment3/car_racing/__pycache__/student.cpython-311.pyc
 assignment3/car_racing/__pycache__/student.cpython-39.pyc
+genetic.pkl

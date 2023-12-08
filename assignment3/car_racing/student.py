@@ -166,35 +166,26 @@ class Policy(nn.Module):
                 rolloutA.append(a)
                 #if (i + 1) % (32*100) == 0:
                 #    state, _ = self.env.reset()
-            print(type(rollout[0]))
             rollout = torch.stack(rollout, dim=0).to(self.device)
             rollout = rollout.permute(0,1,3,2).permute(0,2,1,3)
 
-            optimizerVAE = torch.optim.Adam(self.VAE.parameters(), lr=1e-4)
-            batch_sizeVAE = 32
-            num_epochsVAE = 100
-
-            self.trainmodule(self.VAE, optimizerVAE, rollout, batch_sizeVAE, num_epochsVAE)
+            self.trainmodule(self.VAE.to(self.device), optimizerVAE, rollout.float().to(self.device), batch_sizeVAE, num_epochsVAE, schedulerVAE)
 
             mu, logvar = self.VAE.encode(rollout.float())
             rolloutZ = self.VAE.latent(mu, logvar).detach().to(self.device)
 
             rolloutA = torch.tensor(np.array(rolloutA)).to(self.device).detach()
-            
+
             rolloutRNN = torch.concat((rolloutA.detach(), rolloutZ.detach()), dim=1).to(self.device).detach()
 
             #rolloutH = self.MDN_RNN.forward_lstm(rolloutRNN).to(self.device)
 
-            optimizerRNN = torch.optim.Adam(self.MDN_RNN.parameters(), lr=7e-4)
-            batch_sizeRNN = 32
-            num_epochsRNN = 20
+            self.trainmodule(self.MDN_RNN.to(self.device), optimizerRNN, rolloutRNN.detach().to(self.device), batch_sizeRNN, num_epochsRNN, schedulerRNN)
 
-            self.trainmodule(self.MDN_RNN, optimizerRNN, rollout, batch_sizeRNN, num_epochsRNN)
+            trainer.trainGA()
+            # print(CMAres)
+            # self.C.load_state_dict(CMAres)
 
-            for param in self.C.parameters():
-                param
-            
-            self.trainGA(param)
 
         return
 
