@@ -79,7 +79,7 @@ class Policy(nn.Module):
         rollout = []
         rolloutA = []
         rolloutR = []
-        num_rolloutVAE = 32*50
+        num_rolloutVAE = 32*60
        
         for _ in range(num_rolloutVAE):
            a = self.env.action_space.sample()
@@ -112,7 +112,7 @@ class Policy(nn.Module):
 
         #rolloutH = self.MDN_RNN.forward_lstm(rolloutRNN).to(self.device)
 
-        optimizerRNN = torch.optim.Adam(self.MDN_RNN.parameters(), lr=2.5e-5)
+        optimizerRNN = torch.optim.Adam(self.MDN_RNN.parameters(), lr=3e-5)
         schedulerRNN = torch.optim.lr_scheduler.StepLR(optimizerRNN, step_size=1000, gamma=1)
         batch_sizeRNN = 32
         num_epochsRNN = 20
@@ -136,7 +136,7 @@ class Policy(nn.Module):
             rollout = []
             rolloutA = []
             state, _ = self.env.reset()
-            for _ in range(32*50):
+            for _ in range(32*60):
                 state = torch.tensor(np.array(state)).unsqueeze(0)
                 if len(state.shape)==3:
                     #96,96,3     96,3,96   3,96,96
@@ -240,23 +240,18 @@ class Policy(nn.Module):
                     # play game
                     observation = env.reset()
                     sum_reward = 0
-                    done = False
                     terminated = False
                     truncated = False
                     observation = observation[0]
-                    i=0
-                    while (not (done or terminated or truncated)) and (sum_reward < 1000):
-                        env.render()
-                        
+                    while (not (terminated or truncated)) and (sum_reward < 1000):       
                         observation = observation
                         ob_tensor = torch.tensor(observation/255, dtype=torch.float).unsqueeze(0).permute(0,1,3,2).permute(0,2,1,3).to(self.device)
                         action = self.model.act(ob_tensor)
-                        observation_next, reward, terminated, truncated, info = env.step(action)
+                        observation_next, reward, terminated, truncated, _ = env.step(action)
                         observation = observation_next
-                        i +=1
                         if reward < 0:
                             reward = reward*2
-                        sum_reward += reward * (1.001**i)
+                        sum_reward += reward 
                     print(sum_reward)
                     return sum_reward
 
@@ -264,7 +259,7 @@ class Policy(nn.Module):
             num_generations = num_generations # Number of generations.
             num_parents_mating = 20 # Number of solutions to be selected as parents in the mating pool.
 
-            sol_per_pop = 22 # Number of solutions in the population.
+            sol_per_pop = 26 # Number of solutions in the population.
             num_genes = self.params
 
             
@@ -306,6 +301,69 @@ class Policy(nn.Module):
                     idx += 2
 
                 return np.array(offspring)
+            
+            def custom_crossover(parents, offspring_size, ga_instance):
+                """
+                Custom Crossover for continuous spaces with mutation based on parent ranking.
+
+                Parameters:
+                - parents (numpy.ndarray): Parent solutions.
+                - offspring_size (tuple): Size of the offspring.
+                - ga_instance (pygad.GA): PyGAD GA instance.
+
+                Returns:
+                - offspring (numpy.ndarray): Offspring solutions.
+                """
+                alpha = 0.25
+                offspring = []
+                idx = 0
+
+                # Get parent rankings from ga_instance
+                parent_ranks = ga_instance.last_generation_fitness.argsort()
+
+                # Get the number of genes to mutate based on mutation_percent_genes
+
+                while len(offspring) < offspring_size[0]:
+                    # Select parents based on their ranks
+                    parent1_rank = parent_ranks[idx % parents.shape[0]]
+                    parent2_rank = parent_ranks[(idx + 1) % parents.shape[0]]
+
+                    # Adjust mutation strength based on parent rankings
+                    mutation_strength = alpha + 0.25 * (parent1_rank+parent2_rank / (len(parent_ranks)*2))
+
+                    parent1 = parents[idx % parents.shape[0], :].copy()
+                    parent2 = parents[(idx + 1) % parents.shape[0], :].copy()
+
+                    num_genes_to_mutate = 0 
+
+                    if parent1_rank > len(parent_ranks)/2:
+                        num_genes_to_mutate += int(np.ceil(ga_instance.mutation_percent_genes[1] * parents.shape[1] / 100)/2)
+                    else:
+                        num_genes_to_mutate += int(np.ceil(ga_instance.mutation_percent_genes[0] * parents.shape[1] / 100)/2)
+
+                    if parent2_rank > len(parent_ranks)/2:
+                        num_genes_to_mutate += int(np.ceil(ga_instance.mutation_percent_genes[1] * parents.shape[1] / 100)/2)
+                    else:
+                        num_genes_to_mutate += int(np.ceil(ga_instance.mutation_percent_genes[0] * parents.shape[1] / 100)/2)
+
+                    # Generate random indices for mutation
+                    mutation_indices = np.random.choice(parent1.shape[0], num_genes_to_mutate, replace=False)
+
+                    # Perform blend crossover with mutation at selected indices
+                    child1 = parent1.copy()
+                    child2 = parent2.copy()
+
+                    rand_values = np.random.uniform(-mutation_strength, mutation_strength, size=num_genes_to_mutate)
+
+                    child1[mutation_indices] = 0.5 * ((1 + alpha) * parent1[mutation_indices] + (1 - alpha) * parent2[mutation_indices] + rand_values)
+                    child2[mutation_indices] = 0.5 * ((1 + alpha) * parent2[mutation_indices] + (1 - alpha) * parent1[mutation_indices] + rand_values)
+
+                    offspring.append(child1)
+                    offspring.append(child2)
+
+                    idx += 2
+
+                return np.array(offspring)
 
             ga_instance = pygad.GA(num_generations=num_generations,
                                 num_parents_mating=num_parents_mating,
@@ -314,8 +372,8 @@ class Policy(nn.Module):
                                 fitness_func=fitness_func,
                                 on_generation=on_generation,
                                 mutation_type="adaptive",
-                                keep_elitism=2,
-                                crossover_type=blend_crossover,
+                                keep_elitism=4,
+                                crossover_type=custom_crossover,
                                 parent_selection_type="rank",
                                 mutation_percent_genes =(30,5),
                                 parallel_processing=["thread", 6]
