@@ -1,3 +1,5 @@
+from genericpath import exists
+from os import mkdir, remove
 import gymnasium as gym
 import torch
 import torch.nn as nn
@@ -5,6 +7,8 @@ import torch.nn.functional as F
 import numpy as np
 import pygad.torchga
 import pygad
+from torchvision import transforms
+import matplotlib.pyplot as plt
 #from multiprocessing import Lock
 
 class Policy(nn.Module):
@@ -19,12 +23,13 @@ class Policy(nn.Module):
         #TODO 
         latent_dim = 100
         hidden_size = 256
-        self.VAE = VAE(latent_size = latent_dim).to(self.device)
+        self.VAE = VAE(latent_size=latent_dim).to(self.device)
         self.MDN_RNN = MDN_RNN(input_size = latent_dim + 3, output_size=latent_dim).to(self.device)
         #self.MDN_RNN = MDRNN(latent_dim, 3, hidden_size, 10)
-        self.Clinear = nn.Linear(in_features=latent_dim + hidden_size, out_features=3).to(self.device)
+        #self.Clinear = nn.Linear(in_features=latent_dim + hidden_size, out_features=3).to(self.device)
         self.C = LearnableClippingLayer(in_features=latent_dim + hidden_size, out_features=3).to(self.device)
         self.a = torch.tensor([0,0,0]).to(self.device)
+        self.OBS_SIZE = 64
 
     def forward(self, x):
         # TODO
@@ -43,7 +48,13 @@ class Policy(nn.Module):
         # cumulative_reward += reward
         # h = rnn.forward([a, z, h])
         #print(state.shape)
-        mu, logvar = self.VAE.encode(state.float())
+
+        if "numpy" in str(type(state)):
+            state = torch.tensor(state)
+        if len(state.shape) ==3:
+            state = state.unsqueeze(0)
+        state = state.permute(0,1,3,2).permute(0,2,1,3)
+        mu, logvar = self.VAE.encode(state.float().to(self.device))
         z = self.VAE.latent(mu, logvar)
         
         #print(list(z))
@@ -54,20 +65,21 @@ class Policy(nn.Module):
                 my_function.is_first_call = False
 
             if my_function.is_first_call:
-                return  self.C(torch.cat((z, torch.zeros((1,256)).to(self.device)),dim=1).to(self.device)).to(self.device)
+                return  self.C(torch.cat((z, torch.zeros((1,256)).to(self.device)),dim=1).to(self.device))
             else:
-                return self.a
+                return self.a.to(self.device)
         
         self.a = my_function()
         if self.a.dim==2:
             self.a = self.a.unsqueeze(0)
             
         rolloutRNN = torch.concat((self.a, z), dim=1).to(self.device)
-        output, state = self.MDN_RNN.forward_lstm(rolloutRNN)
+        output, (hn, cn) = self.MDN_RNN.forward_lstm(rolloutRNN)
 
         output = output.squeeze(0)
+        hn = hn.squeeze(0)
         
-        self.a = self.C(torch.cat((z, output),dim=1).to(self.device)).to(self.device)
+        self.a = self.C(torch.cat((z, hn),dim=1).to(self.device)).to(self.device)
         #print(self.a)
         torch.clip(self.a, min = -1, max = 1 )
 
@@ -79,27 +91,47 @@ class Policy(nn.Module):
         rollout = []
         rolloutA = []
         rolloutR = []
-        num_rolloutVAE = 32*60
+        num_rolloutVAE = 128*60
+        envVAE = gym.make('CarRacing-v2', continuous=False)#, render_mode='human')
+        envVAE.reset()
        
-        for _ in range(num_rolloutVAE):
-           a = self.env.action_space.sample()
-           observation, reward, terminated, truncated, info = self.env.step(a)
+        for i in range(num_rolloutVAE):
+           
+           a = int(np.random.rand() *3 +1)
+           observation, reward, terminated, truncated, _ = envVAE.step(a)
            observation = torch.from_numpy(observation/255)
+           observation = observation.permute(0,2,1).permute(1,0,2)
+           #observation = transform_train(observation)
            rollout.append(observation)
            rolloutA.append(a)
            rolloutR.append(reward)
-           #if (i + 1) % (32*100) == 0:
-           #    state, _ = self.env.reset()
+           if ((i + 1) % (128*5) == 0) or (terminated or truncated):
+               state, _ = envVAE.reset()
         
         rollout = torch.stack(rollout, dim=0).to(self.device)
-        rollout = rollout.permute(0,1,3,2).permute(0,2,1,3)
+        
 
-        optimizerVAE = torch.optim.Adam(self.VAE.parameters(), lr=1e-5)
-        schedulerVAE = torch.optim.lr_scheduler.StepLR(optimizerVAE, step_size=10, gamma=0.8)
-        batch_sizeVAE = 64
+        optimizerVAE = torch.optim.Adam(self.VAE.parameters(), lr=2.5e-4)
+        schedulerVAE = torch.optim.lr_scheduler.StepLR(optimizerVAE, step_size=10, gamma=0.8)   
+        batch_sizeVAE = 128
         num_epochsVAE = 200
 
         self.trainmodule(self.VAE.to(self.device), optimizerVAE, rollout.float().to(self.device), batch_sizeVAE, num_epochsVAE, schedulerVAE)
+
+        samples = rollout[(np.random.rand(10)*rollout.shape[0]).astype(int)]
+        decodedSamples, _, _ = self.VAE.forward(samples.float())
+
+        for index, obs in enumerate(samples):
+            plt.subplot(5, 4, 2*index +1)
+            obs = torch.movedim(obs, (1, 2, 0), (0, 1, 2))
+            plt.imshow(obs.cpu().numpy(), interpolation='nearest')
+
+        for index, dec in enumerate(decodedSamples):
+            plt.subplot(5, 4, 2*index +2)
+            decoded = torch.movedim(dec, (1, 2, 0), (0, 1, 2))
+            plt.imshow(decoded.cpu().detach().numpy(), interpolation="nearest")
+
+        plt.show()
 
         mu, logvar = self.VAE.encode(rollout.float())
         rolloutZ = self.VAE.latent(mu, logvar).detach().to(self.device)
@@ -112,14 +144,14 @@ class Policy(nn.Module):
 
         #rolloutH = self.MDN_RNN.forward_lstm(rolloutRNN).to(self.device)
 
-        optimizerRNN = torch.optim.Adam(self.MDN_RNN.parameters(), lr=3e-5)
+        optimizerRNN = torch.optim.Adam(self.MDN_RNN.parameters(), lr=2.5e-5)
         schedulerRNN = torch.optim.lr_scheduler.StepLR(optimizerRNN, step_size=1000, gamma=1)
         batch_sizeRNN = 32
         num_epochsRNN = 20
 
         self.trainmodule(self.MDN_RNN.to(self.device), optimizerRNN, rolloutRNN.detach().to(self.device), batch_sizeRNN, num_epochsRNN, schedulerRNN)
 
-        #MDN_RNN.train()
+        #self.MDN_RNN()
 
         # Example usage
         
@@ -136,32 +168,23 @@ class Policy(nn.Module):
             rollout = []
             rolloutA = []
             state, _ = self.env.reset()
-            for _ in range(32*60):
+            for _ in range(128*60):
                 state = torch.tensor(np.array(state)).unsqueeze(0)
-                if len(state.shape)==3:
-                    #96,96,3     96,3,96   3,96,96
-                    state = state.permute(0,2,1)
-                    #print("first",state.shape)
-                    # state = state.permute(1,0,2).to(self.device)
-                    # print("second",state.shape)
-                if len(state.shape) == 4:
-                    state = state.permute(0,1,3,2).permute(0,2,1,3).to(self.device)
-                    #print("after permute",state.shape)
                 
                 state = state.to(self.device)
                 a = self.act(state)
                 observation, reward, terminated, truncated, info = self.env.step(a)
-                state = observation
-                state = torch.tensor(state)
-                rollout.append(torch.from_numpy(observation/255))
+                
+                state = torch.from_numpy(observation)
+                state = state.permute(0,2,1).permute(1,0,2)
+                rollout.append(state/255)
                 rolloutA.append(a)
                 #if (i + 1) % (32*100) == 0:
                 #    state, _ = self.env.reset()
-            print(type(rollout[0]))
             rollout = torch.stack(rollout, dim=0).to(self.device)
-            rollout = rollout.permute(0,1,3,2).permute(0,2,1,3)
+           # rollout = rollout.permute(0,1,3,2).permute(0,2,1,3)
 
-            optimizerVAE = torch.optim.Adam(self.VAE.parameters(), lr=5e-7)
+            optimizerVAE = torch.optim.Adam(self.VAE.parameters(), lr=7.5e-5)
 
             self.trainmodule(self.VAE.to(self.device), optimizerVAE, rollout.float().to(self.device), batch_sizeVAE, num_epochsVAE, schedulerVAE)
 
@@ -197,6 +220,7 @@ class Policy(nn.Module):
 
     def trainmodule(self, network, optimizer, data, batch_size,  num_epochs, scheduler):
         #torch.autograd.set_detect_anomaly(True)
+        #network.train()
         for epoch in range(num_epochs):
             for i in range(0, len(data), batch_size):
                 # Get batch
@@ -245,7 +269,7 @@ class Policy(nn.Module):
                     observation = observation[0]
                     while (not (terminated or truncated)) and (sum_reward < 1000):       
                         observation = observation
-                        ob_tensor = torch.tensor(observation/255, dtype=torch.float).unsqueeze(0).permute(0,1,3,2).permute(0,2,1,3).to(self.device)
+                        ob_tensor = torch.tensor(observation/255, dtype=torch.float).to(self.device)
                         action = self.model.act(ob_tensor)
                         observation_next, reward, terminated, truncated, _ = env.step(action)
                         observation = observation_next
@@ -257,9 +281,9 @@ class Policy(nn.Module):
 
 
             num_generations = num_generations # Number of generations.
-            num_parents_mating = 20 # Number of solutions to be selected as parents in the mating pool.
+            num_parents_mating = 12 # Number of solutions to be selected as parents in the mating pool.
 
-            sol_per_pop = 26 # Number of solutions in the population.
+            sol_per_pop = 20 # Number of solutions in the population.
             num_genes = self.params
 
             
@@ -301,6 +325,95 @@ class Policy(nn.Module):
                     idx += 2
 
                 return np.array(offspring)
+
+            def simulated_binary_crossover(parents, offspring_size ,ga_instance):
+                """
+                Simulated Binary Crossover (SBX) for continuous spaces.
+
+                Parameters:
+                parents (numpy.ndarray): Parent solutions.
+                offspring_size (tuple): Size of the offspring.
+                eta (int): Distribution index for crossover.
+
+                Returns:
+                offspring (numpy.ndarray): Offspring solutions.
+                """
+                eta=5
+                offspring = []
+                idx = 0
+
+                def normalize_array(arr):
+                    min_val = np.min(arr)
+                    max_val = np.max(arr)
+
+                    # Avoid division by zero if all elements are the same
+                    if min_val == max_val:
+                        return np.zeros_like(arr)
+
+                    normalized_arr = (arr - min_val) / (max_val - min_val)
+                    return normalized_arr
+                # Get parent rankings from ga_instance
+                parent_ranks = normalize_array(ga_instance.last_generation_fitness)
+
+                parent_ranks_sorted = np.sort(parent_ranks)[::-1]              
+
+                # Get the number of genes to mutate based on mutation_percent_genes             
+
+                # Convert floats to tuples with a fixed precision (e.g., 2 decimal places)
+                element_to_index = {round(value, 5): index for index, value in enumerate(parent_ranks_sorted)}
+
+                # Replace elements in the original list with their corresponding indicesa
+                parent_ranks = [element_to_index[round(value, 5)]+1 for value in parent_ranks]
+
+                while len(offspring) < offspring_size[0]:
+                    parent1 = parents[idx % parents.shape[0], :].copy()
+                    parent2 = parents[(idx + 1) % parents.shape[0], :].copy()
+                    parent1rank = parent_ranks[idx % parents.shape[0]]
+                    parent2rank = parent_ranks[(idx + 1) % parents.shape[0]]
+                    if parent1rank > len(parent_ranks):
+                        prob = ga_instance.mutation_percent_genes[0]/100
+                    else:
+                        prob = ga_instance.mutation_percent_genes[1]/100
+                    for i in range(len(parent1)):
+                        if np.random.rand() > prob:
+                            if abs(parent1[i] - parent2[i]) > 1e-14:  # Avoid division by zero
+                                # Intermediate calculations
+                                y1 = min(parent1[i], parent2[i])
+                                y2 = max(parent1[i], parent2[i])
+                                rand = np.random.rand()
+                                beta = 1.0 + (2.0 * (y1 - (-1)) / (y2 - y1))
+                                alpha = 2.0 - beta**-(eta + 1)
+                                
+                                if rand <= 1.0 / alpha:
+                                    beta_q = (rand * alpha)**(1.0 / (eta + 1))
+                                else:
+                                    beta_q = (1.0 / (2.0 - rand * alpha))**(1.0 / (eta + 1))
+
+                                # Generating the first child
+                                child1 = 0.5 * ((y1 + y2) - beta_q * (y2 - y1))
+
+                                # Intermediate calculations for second child
+                                beta = 1.0 + (2.0 * ((1) - y2) / (y2 - y1))
+                                alpha = 2.0 - beta**-(eta + 1)
+
+                                if rand <= 1.0 / alpha:
+                                    beta_q = (rand * alpha)**(1.0 / (eta + 1))
+                                else:
+                                    beta_q = (1.0 / (2.0 - rand * alpha))**(1.0 / (eta + 1))
+
+                                # Generating the second child
+                                child2 = 0.5 * ((y1 + y2) + beta_q * (y2 - y1))
+
+                                parent1[i] = child1
+                                parent2[i] = child2
+
+                    offspring.append(parent1)
+                    offspring.append(parent2)
+
+                    idx += 2
+
+                return np.array(offspring)
+
             
             def custom_crossover(parents, offspring_size, ga_instance):
                 """
@@ -314,14 +427,40 @@ class Policy(nn.Module):
                 Returns:
                 - offspring (numpy.ndarray): Offspring solutions.
                 """
-                alpha = 0.25
+                alpha = 0.1
                 offspring = []
                 idx = 0
 
-                # Get parent rankings from ga_instance
-                parent_ranks = ga_instance.last_generation_fitness.argsort()
+                def normalize_array(arr):
+                    min_val = np.min(arr)
+                    max_val = np.max(arr)
 
-                # Get the number of genes to mutate based on mutation_percent_genes
+                    # Avoid division by zero if all elements are the same
+                    if min_val == max_val:
+                        return np.zeros_like(arr)
+
+                    normalized_arr = (arr - min_val) / (max_val - min_val)
+                    return normalized_arr
+                # Get parent rankings from ga_instance
+                parent_ranks = normalize_array(ga_instance.last_generation_fitness)
+
+                parent_ranks_sorted = np.sort(parent_ranks)[::-1]              
+
+                # Get the number of genes to mutate based on mutation_percent_genes             
+
+                # Convert floats to tuples with a fixed precision (e.g., 2 decimal places)
+                element_to_index = {round(value, 5): index for index, value in enumerate(parent_ranks_sorted)}
+
+                # Replace elements in the original list with their corresponding indicesa
+                parent_ranks = [element_to_index[round(value, 5)]+1 for value in parent_ranks]
+
+                # # Create a dictionary mapping unique elements to indices
+                # element_to_index = {value: index for index, value in enumerate(set(parent_ranks))}
+
+                # # Replace elements in the original list with their corresponding indices
+                # parent_ranks = [element_to_index[value]+1 for value in parent_ranks]
+                
+                #print("ga_instance.last_generation_fitness", ga_instance.last_generation_fitness, "element_to_index", element_to_index, "parent_ranks", parent_ranks)
 
                 while len(offspring) < offspring_size[0]:
                     # Select parents based on their ranks
@@ -329,34 +468,64 @@ class Policy(nn.Module):
                     parent2_rank = parent_ranks[(idx + 1) % parents.shape[0]]
 
                     # Adjust mutation strength based on parent rankings
-                    mutation_strength = alpha + 0.25 * (parent1_rank+parent2_rank / (len(parent_ranks)*2))
-
+                    mutation_strength = alpha * (parent1_rank+parent2_rank / (len(parent_ranks)*2))
                     parent1 = parents[idx % parents.shape[0], :].copy()
                     parent2 = parents[(idx + 1) % parents.shape[0], :].copy()
 
-                    num_genes_to_mutate = 0 
+                    num_genes_to_mutate1 = 0 
+                    num_genes_to_mutate2 = 0 
 
                     if parent1_rank > len(parent_ranks)/2:
-                        num_genes_to_mutate += int(np.ceil(ga_instance.mutation_percent_genes[1] * parents.shape[1] / 100)/2)
+                        num_genes_to_mutate1 += int(np.ceil(ga_instance.mutation_percent_genes[0] * parents.shape[1] / 100))
                     else:
-                        num_genes_to_mutate += int(np.ceil(ga_instance.mutation_percent_genes[0] * parents.shape[1] / 100)/2)
+                        num_genes_to_mutate1 += int(np.ceil(ga_instance.mutation_percent_genes[1] * parents.shape[1] / 100))
 
                     if parent2_rank > len(parent_ranks)/2:
-                        num_genes_to_mutate += int(np.ceil(ga_instance.mutation_percent_genes[1] * parents.shape[1] / 100)/2)
+                        num_genes_to_mutate2 += int(np.ceil(ga_instance.mutation_percent_genes[0] * parents.shape[1] / 100))
                     else:
-                        num_genes_to_mutate += int(np.ceil(ga_instance.mutation_percent_genes[0] * parents.shape[1] / 100)/2)
+                        num_genes_to_mutate2 += int(np.ceil(ga_instance.mutation_percent_genes[1] * parents.shape[1] / 100))
+
+                    #print("num_genes_to_mutate", num_genes_to_mutate)
 
                     # Generate random indices for mutation
-                    mutation_indices = np.random.choice(parent1.shape[0], num_genes_to_mutate, replace=False)
+                    mutation_indices1 = np.random.choice(parent1.shape[0], num_genes_to_mutate1, replace=False)
+                    non_mutation_indices1 = complementary_indices = np.setdiff1d(np.arange(len(parent1)), mutation_indices1)
+                    mutation_indices2 = np.random.choice(parent2.shape[0], num_genes_to_mutate2, replace=False)
+                    non_mutation_indices2 = complementary_indices = np.setdiff1d(np.arange(len(parent2)), mutation_indices2)
 
                     # Perform blend crossover with mutation at selected indices
-                    child1 = parent1.copy()
-                    child2 = parent2.copy()
+                    child1 = torch.zeros(parent1.shape)
+                    child2 = torch.zeros(parent2.shape)
 
-                    rand_values = np.random.uniform(-mutation_strength, mutation_strength, size=num_genes_to_mutate)
+                    rand_values1 = np.random.uniform(-mutation_strength, mutation_strength, size=num_genes_to_mutate1)
+                    rand_values2 = np.random.uniform(-mutation_strength, mutation_strength, size=num_genes_to_mutate2)
 
-                    child1[mutation_indices] = 0.5 * ((1 + alpha) * parent1[mutation_indices] + (1 - alpha) * parent2[mutation_indices] + rand_values)
-                    child2[mutation_indices] = 0.5 * ((1 + alpha) * parent2[mutation_indices] + (1 - alpha) * parent1[mutation_indices] + rand_values)
+                    parent1nonmutate = parent1.copy()
+                    parent2nonmutate = parent2.copy()
+
+                    parent1mutatep = parent1.copy()
+                    parent2mutatep = parent2.copy()
+                    parent1mutatem = parent1.copy()
+                    parent2mutatem = parent2.copy()
+
+                    parent1nonmutate[non_mutation_indices1] = 0
+                    parent2nonmutate[non_mutation_indices2] = 0
+                    #parent1nonmutate[mutation_indices1] += rand_values1
+                    #parent2nonmutate[mutation_indices2] += rand_values2
+
+                    parent1mutatep[mutation_indices1] = (1 + alpha) * parent1[mutation_indices1]
+                    parent2mutatem[mutation_indices2] = (1 - alpha) * parent2[mutation_indices2]
+                    parent2mutatep[mutation_indices2] = (1 + alpha) * parent2[mutation_indices2]
+                    parent1mutatem[mutation_indices1] = (1 - alpha) * parent1[mutation_indices1]
+
+                    parent1_mutated1 = parent1nonmutate + parent1mutatep
+                    parent2_mutated1 = parent2nonmutate + parent2mutatem
+
+                    parent2_mutated2 = parent2nonmutate + parent2mutatep
+                    parent1_mutated2 = parent1nonmutate + parent1mutatem
+
+                    child1 += 0.5 * ((parent1_mutated1 + parent2_mutated1))
+                    child2 += 0.5 * ((parent2_mutated2 + parent1_mutated2))
 
                     offspring.append(child1)
                     offspring.append(child2)
@@ -373,10 +542,11 @@ class Policy(nn.Module):
                                 on_generation=on_generation,
                                 mutation_type="adaptive",
                                 keep_elitism=4,
-                                crossover_type=custom_crossover,
+                                crossover_type="scattered",
                                 parent_selection_type="rank",
-                                mutation_percent_genes =(30,5),
-                                parallel_processing=["thread", 6]
+                                mutation_percent_genes = (30,5),
+                                parallel_processing=["thread", 6],
+                                
                                 )
 
             ga_instance.run()
@@ -415,6 +585,7 @@ class LearnableClippingLayer(nn.Module):
         x = self.linear(x)
         x = self.scale * torch.tanh(x)
         return x
+    
 
 class VAE(nn.Module):
     
@@ -534,10 +705,16 @@ class VAE(nn.Module):
         return out
     
     def loss_function(self, out, y, mu, logvar):
-        #print("out",out, "\n y",y)
-        CE = F.cross_entropy(out, y)
-        KL = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
-        return KL + CE
+        # Reconstruction loss
+        recon_loss = F.mse_loss(out, y, reduction='sum')
+
+        # KL divergence loss
+        kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+
+        # Total loss is the sum of reconstruction loss and KL divergence loss
+        total_loss = recon_loss + kl_loss
+
+        return total_loss
 
     def get_latent_size(self):
         
@@ -545,6 +722,112 @@ class VAE(nn.Module):
 
     def set_device(self, device):
         self.device = device
+
+
+class VAE1(nn.Module):
+    """ Variational Autoencoder (specific for this task)"""
+
+    def __init__(self):
+        super().__init__()
+
+        # global variables
+        self.CHANNELS = 3
+        self.LATENT = 100
+        self.OBS_SIZE = 96
+        
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+        # encoder
+        self.encoder = nn.Sequential(
+            nn.Conv2d(self.CHANNELS, 16, kernel_size=3, stride=2),  # Convolution with stride 1
+            nn.LeakyReLU(0.2),
+            nn.AvgPool2d(kernel_size=4, stride=2),  # Average pooling to reduce dimensions
+            nn.Flatten(),
+            nn.Linear(16*22*22, 2048),  # Adjusted for new flattened size
+            nn.LeakyReLU(0.2),
+            nn.Linear(2048, 256),
+            nn.LeakyReLU(0.2)
+        )
+
+        # latent
+        self.mean_layer = nn.Linear(256, self.LATENT)
+        self.logvar_layer = nn.Linear(256, self.LATENT)
+
+        # decoder
+        self.decoder = nn.Sequential(
+            nn.Linear(self.LATENT, 256),
+            nn.LeakyReLU(0.2),
+            nn.Linear(256, 2048),
+            nn.LeakyReLU(0.2),
+            nn.Linear(2048, 16*22*22),
+            nn.LeakyReLU(0.2),
+            nn.Linear(16*22*22, 3*96*96),
+            nn.LeakyReLU(0.2),
+        )
+
+        #self.convT = nn.ConvTranspose2d(3*96*96, self.CHANNELS, 96, stride=1)
+        self.conv = nn.Conv2d(self.CHANNELS, self.CHANNELS, kernel_size=3, stride=1, padding=1)
+
+    def encode(self, x):
+        x = self.encoder(x)
+        mu = self.mean_layer(x)
+        logsigma =  self.logvar_layer(x)
+        return mu, logsigma
+    
+    def decode(self, x):
+        x = self.decoder(x)
+        batch_size = 1
+        #print(x.shape)
+        if len(x.shape)>1:
+            batch_size = x.shape[0]
+        #print(batch_size)
+        x = torch.reshape(x,(batch_size,3,96,96))
+        x = self.conv(x)
+        x =  F.sigmoid(x)
+        #print(x.shape)
+        return x
+
+    def latent(self, mu, logsigma):
+        eps = torch.randn_like(logsigma).to(self.device)      
+        z = eps.mul(logsigma).add_(mu)
+        return z
+
+    def forward(self, x):
+        mu, logsigma = self.encode(x)
+        z = self.latent(mu, logsigma)
+        recon_x = self.decode(z)
+        return recon_x, mu, logsigma
+
+    def set_device(self, device):
+        self.device = device
+    
+    def save(self, dest):
+        if not exists(dest): mkdir(dest)
+        else: 
+            if exists(dest+self.name.lower()+'.pt'):
+                remove(dest+self.name.lower()+'.pt')
+        torch.save(self.state_dict(), dest+self.name.lower()+'.pt')
+
+    def load(self, dir): 
+        self.load_state_dict(torch.load(dir+self.name.lower()+'.pt', map_location=self.device))
+
+    def loss_function(self, out, y, mu, logvar):
+        # Reconstruction loss
+        recon_loss = F.mse_loss(out, y, reduction='sum')
+
+        # KL divergence loss
+        kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+
+        # Total loss is the sum of reconstruction loss and KL divergence loss
+        total_loss = recon_loss + kl_loss
+
+        return total_loss
+    ''''''
+    def loss_function1(self, out, y, mu, logvar):
+        CE = np.array([F.cross_entropy(out[0], y[0], reduction="sum").detach().cpu() ,F.cross_entropy(out[1], y[1], reduction="sum").detach().cpu(), F.cross_entropy(out[2], y[2], reduction="sum").detach().cpu()]).mean()
+        KL = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+        return CE+KL
+    
 
 class MDN(nn.Module):
     
