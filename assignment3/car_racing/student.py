@@ -1,5 +1,4 @@
-from genericpath import exists
-from os import mkdir, remove
+
 import gymnasium as gym
 import torch
 import torch.nn as nn
@@ -7,12 +6,17 @@ import torch.nn.functional as F
 import numpy as np
 import pygad.torchga
 import pygad
-from torchvision import transforms
+from queue import LifoQueue as Queue
 import matplotlib.pyplot as plt
+import cma
+from os.path import exists
+from os import mkdir, remove
+import time
+from tqdm import tqdm
 #from multiprocessing import Lock
 
 class Policy(nn.Module):
-    continuous = True # you can change this
+    continuous = False # you can change this
 
     def __init__(self, device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')):
         super(Policy, self).__init__()
@@ -21,15 +25,18 @@ class Policy(nn.Module):
         self.env = gym.make('CarRacing-v2', continuous=self.continuous, render_mode='human')
         self.env.reset()
         #TODO 
-        latent_dim = 100
+        latent_dim = 32
         hidden_size = 256
         self.VAE = VAE(latent_size=latent_dim).to(self.device)
-        self.MDN_RNN = MDN_RNN(input_size = latent_dim + 3, output_size=latent_dim).to(self.device)
+
+        self.modules_dir = r'C:\Users\Paolo\Downloads\RL\checkpoint'
+
+        self.name = "Giovanni"
+
+        #self.MDN_RNN = MDN_RNN(input_size = latent_dim + 3, output_size=latent_dim).to(self.device)
         #self.MDN_RNN = MDRNN(latent_dim, 3, hidden_size, 10)
-        #self.Clinear = nn.Linear(in_features=latent_dim + hidden_size, out_features=3).to(self.device)
-        self.C = LearnableClippingLayer(in_features=latent_dim + hidden_size, out_features=3).to(self.device)
-        self.a = torch.tensor([0,0,0]).to(self.device)
-        self.OBS_SIZE = 64
+        self.C = nn.Linear(in_features=latent_dim, out_features=4).to(self.device)
+        #self.C = LearnableClippingLayer(in_features=latent_dim, out_features=4).to(self.device)
 
     def forward(self, x):
         # TODO
@@ -42,59 +49,118 @@ class Policy(nn.Module):
     
     def act(self, state):
         # TODO
-        # z = vae.encode(obs)
-        # a = controller.action([z, h])
-        # obs, reward, done = env.step(a)
-        # cumulative_reward += reward
-        # h = rnn.forward([a, z, h])
-        #print(state.shape)
+
+        if not ('q' in locals()):
+            q = Queue(maxsize=3)
+            for _ in range(3):
+                q.put(torch.zeros((3)))
 
         if "numpy" in str(type(state)):
             state = torch.tensor(state)
         if len(state.shape) ==3:
             state = state.unsqueeze(0)
-        state = state.permute(0,1,3,2).permute(0,2,1,3)
-        mu, logvar = self.VAE.encode(state.float().to(self.device))
+        if state.shape[1] == 96:
+            state = state.permute(0,1,3,2).permute(0,2,1,3).to(self.device)
+        mu, logvar = self.VAE.encode(state.float())
         z = self.VAE.latent(mu, logvar)
-        
-        #print(list(z))
-        def my_function():
-            if not hasattr(my_function, "is_first_call"):
-                my_function.is_first_call = True
-            else:
-                my_function.is_first_call = False
+        q.get()
+        q.put(z)
+        l = []
+        while not(q.empty):
+            l.append(q.get())
+        for i in range(len(l)):
+            q.put(l[i])
 
-            if my_function.is_first_call:
-                return  self.C(torch.cat((z, torch.zeros((1,256)).to(self.device)),dim=1).to(self.device))
-            else:
-                return self.a.to(self.device)
-        
-        self.a = my_function()
-        if self.a.dim==2:
-            self.a = self.a.unsqueeze(0)
-            
-        rolloutRNN = torch.concat((self.a, z), dim=1).to(self.device)
-        output, (hn, cn) = self.MDN_RNN.forward_lstm(rolloutRNN)
+        self.a = self.C(z)
+        torch.clip(self.a, min = 0, max = 5 )
+        self.a = self.a.cpu().detach()
 
-        output = output.squeeze(0)
-        hn = hn.squeeze(0)
-        
-        self.a = self.C(torch.cat((z, hn),dim=1).to(self.device)).to(self.device)
         #print(self.a)
-        torch.clip(self.a, min = -1, max = 1 )
 
-        return self.a.cpu().float().squeeze().detach().numpy()
+        return int(torch.argmax(self.a))
+    
+# ctallec function:
+    def unflatten_parameters(self, params, example, device):
+        """ Unflatten parameters. Note: example is generator of parameters (module.parameters()), used to reshape params """
+        
+        params = torch.Tensor(params).to(device)
+        idx = 0
+        unflattened = []
+        for e_p in example:
+            unflattened += [params[idx:idx + e_p.numel()].view(e_p.size())]
+            idx += e_p.numel()
+        return unflattened
+
+
+    def evaluate(self, solutions, results, render=False, num_eval=12):
+        print("Evaluating...")
+        index_min = np.argmin(results)
+        best_guess = solutions[index_min]
+        restimates = []
+
+        p_list = []
+        for s_id in range(num_eval):
+            p_list.append((s_id, best_guess))
+
+        for _ in tqdm(range(num_eval)):
+            value = self.rollout(self, best_guess, device=self.device, render=render)
+            restimates.append(value)
+
+        
+        return best_guess, np.mean(restimates)
+
+    def rollout(self, agent, params=None, limit=1000, device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'), render=False):
+        """ Execute a rollout and returns minus cumulative reward. """
+
+        render_mode = 'human' if render else 'rgb_array'
+        self.env = gym.make('CarRacing-v2', continuous=False, render_mode=render_mode)
+
+        if params is not None:
+            params = self.unflatten_parameters(params, agent.C.parameters(), device)
+
+            # load parameters into agent controller
+            for p, p_0 in zip(agent.C.parameters(), params):
+                p.data.copy_(p_0)
+
+        # ####DEGUB####
+        # for p in agent.c.parameters():
+        #     print('new parameters: {}'.format(p))
+        #     break
+        # ####DEGUB####
+
+        obs, _ = self.env.reset()
+        cumulative = 0
+        done = False
+
+        for _ in range(limit):
+            action = self.act(obs) 
+            obs, reward, terminated, truncated, _ = self.env.step(action)
+                
+            done = terminated 
+            if done: break
+
+            cumulative += reward # 50 100 -50
+
+        # print("cumulative: {}".format(cumulative))
+        cumulative += 1000 # reward "temperature"
+        return (- cumulative) # 950 900 1050
 
     def train(self):
         # TODO
         #first initialization / skip if load from file
-        rollout = []
-        rolloutA = []
+
+    
+
+        rolloutVAE = []
+        #rolloutA = []
         rolloutR = []
-        num_rolloutVAE = 128*60
+        num_rolloutVAE = 128*120
         envVAE = gym.make('CarRacing-v2', continuous=False)#, render_mode='human')
         envVAE.reset()
-       
+        train_vae = True
+        if train_vae == False:
+            num_rolloutVAE = 1
+
         for i in range(num_rolloutVAE):
            
            a = int(np.random.rand() *3 +1)
@@ -102,113 +168,260 @@ class Policy(nn.Module):
            observation = torch.from_numpy(observation/255)
            observation = observation.permute(0,2,1).permute(1,0,2)
            #observation = transform_train(observation)
-           rollout.append(observation)
-           rolloutA.append(a)
+           rolloutVAE.append(observation)
+           #rolloutA.append(a)
            rolloutR.append(reward)
-           if ((i + 1) % (128*5) == 0) or (terminated or truncated):
+           if terminated or truncated:
                state, _ = envVAE.reset()
         
-        rollout = torch.stack(rollout, dim=0).to(self.device)
+        rolloutVAE = torch.stack(rolloutVAE, dim=0).float().to(self.device)
         
 
-        optimizerVAE = torch.optim.Adam(self.VAE.parameters(), lr=2.5e-4)
-        schedulerVAE = torch.optim.lr_scheduler.StepLR(optimizerVAE, step_size=10, gamma=0.8)   
+        optimizerVAE1 = torch.optim.Adam(self.VAE.parameters(), lr=2e-3)
+        optimizerVAE2 = torch.optim.Adam(self.VAE.parameters(), lr=1e-4)
+        optimizerVAE3 = torch.optim.Adam(self.VAE.parameters(), lr=3e-5)
+        optimizerVAE4 = torch.optim.Adam(self.VAE.parameters(), lr=1e-6)
+        schedulerVAE = torch.optim.lr_scheduler.StepLR(optimizerVAE1, step_size=10, gamma=0.8)   
         batch_sizeVAE = 128
-        num_epochsVAE = 200
+        num_epochsVAE = 100
+        #self.VAE = torch.load('vae2.pt')
+        if train_vae == True:
+            print("train 1")
+            self.trainmodule(self.VAE, optimizerVAE1, rolloutVAE, batch_sizeVAE, 75, schedulerVAE)
+            self.trainmodule(self.VAE, optimizerVAE2, rolloutVAE, batch_sizeVAE, 150, schedulerVAE)
+            self.trainmodule(self.VAE, optimizerVAE3, rolloutVAE, batch_sizeVAE, 225, schedulerVAE)
+            self.trainmodule(self.VAE, optimizerVAE4, rolloutVAE, batch_sizeVAE, 500, schedulerVAE)
+            #save vae
 
-        self.trainmodule(self.VAE.to(self.device), optimizerVAE, rollout.float().to(self.device), batch_sizeVAE, num_epochsVAE, schedulerVAE)
 
-        samples = rollout[(np.random.rand(10)*rollout.shape[0]).astype(int)]
-        decodedSamples, _, _ = self.VAE.forward(samples.float())
-
-        for index, obs in enumerate(samples):
-            plt.subplot(5, 4, 2*index +1)
-            obs = torch.movedim(obs, (1, 2, 0), (0, 1, 2))
-            plt.imshow(obs.cpu().numpy(), interpolation='nearest')
-
-        for index, dec in enumerate(decodedSamples):
-            plt.subplot(5, 4, 2*index +2)
-            decoded = torch.movedim(dec, (1, 2, 0), (0, 1, 2))
-            plt.imshow(decoded.cpu().detach().numpy(), interpolation="nearest")
-
-        plt.show()
-
-        mu, logvar = self.VAE.encode(rollout.float())
-        rolloutZ = self.VAE.latent(mu, logvar).detach().to(self.device)
-
-        rolloutA = torch.tensor(np.array(rolloutA)).to(self.device).detach()
-
+           
         
+            samples = rolloutVAE[(np.random.rand(10)*rolloutVAE.shape[0]).astype(int)]
+            decodedSamples, _, _ = self.VAE.forward(samples.float())
+            torch.save(self.VAE, 'vae1.pt')
+            for index, obs in enumerate(samples):
+                plt.subplot(5, 4, 2*index +1)
+                obs = torch.movedim(obs, (1, 2, 0), (0, 1, 2))
+                plt.imshow(obs.cpu().numpy(), interpolation='nearest')
 
-        rolloutRNN = torch.concat((rolloutA.detach(), rolloutZ.detach()), dim=1).to(self.device).detach()
+            for index, dec in enumerate(decodedSamples):
+                plt.subplot(5, 4, 2*index +2)
+                decoded = torch.movedim(dec, (1, 2, 0), (0, 1, 2))
+                plt.imshow(decoded.cpu().detach().numpy(), interpolation="nearest")
+
+            plt.show()
+            return
+        else:
+            #load vae
+            self.VAE = torch.load('vae.pt')
+
+        #self.trainmodule(self.VAE, optimizerVAE, rollout, batch_sizeVAE, num_epochsVAE, schedulerVAE)
+
+
+
+
+
+
+
+        #mu, logvar = self.VAE.encode(rollout.float())
+        #rolloutZ = self.VAE.latent(mu, logvar).detach().to(self.device)
+
+        #rolloutA = torch.tensor(np.array(rolloutA)).to(self.device).detach()
+
+        #rolloutRNN = torch.concat((rolloutA.detach(), rolloutZ.detach()), dim=1).to(self.device).detach()
 
         #rolloutH = self.MDN_RNN.forward_lstm(rolloutRNN).to(self.device)
 
-        optimizerRNN = torch.optim.Adam(self.MDN_RNN.parameters(), lr=2.5e-5)
-        schedulerRNN = torch.optim.lr_scheduler.StepLR(optimizerRNN, step_size=1000, gamma=1)
-        batch_sizeRNN = 32
-        num_epochsRNN = 20
+        # optimizerRNN = torch.optim.Adam(self.MDN_RNN.parameters(), lr=2.5e-5)
+        # schedulerRNN = torch.optim.lr_scheduler.StepLR(optimizerRNN, step_size=1000, gamma=1)
+        # batch_sizeRNN = 32
+        # num_epochsRNN = 20
 
-        self.trainmodule(self.MDN_RNN.to(self.device), optimizerRNN, rolloutRNN.detach().to(self.device), batch_sizeRNN, num_epochsRNN, schedulerRNN)
+        #self.trainmodule(self.MDN_RNN.to(self.device), optimizerRNN, rolloutRNN.detach().to(self.device), batch_sizeRNN, num_epochsRNN, schedulerRNN)
 
-        #self.MDN_RNN()
+                ###DEGUB####
+        for p in self.C.parameters():
+            print('previous parameters: {}'.format(p))
+            break
+        ###DEGUB####
 
-        # Example usage
+        # training parameters
+        pop_size = 6
+        n_samples = 2 
+        generation = 0
+        target_return = 950 + 1000
+
+        # log variables
+        log_step = 3 # print log each n steps
+        display = True
+        render = False
         
-        param = sum(p.numel() for p in self.C.parameters())
+        # define current best and load parameters
+        cur_best = 100000000000 # max cap
 
-        trainer = self.trainGA(param, self.env, self)
-        trainer.trainGA(5)
-        # print(CMAres)
-        # self.C.load_state_dict(CMAres)
+        print("Attempting to load previous best...")
+        if exists(self.modules_dir+'controller.pt') and exists(self.modules_dir+'cur_best.bk'):
+            # state = torch.load(c_checkpoint, map_location=self.device)
+            with open(self.modules_dir+'cur_best.bk', 'r') as f : 
+                for i in f : cur_best = float(i)
+            self.C = self.C.load(self.modules_dir)
+            print("Previous best was {}...".format(-cur_best))
+
+        ####DEGUB####
+        for p in self.C.parameters():
+            print('previous parameters: {}'.format(p))
+            break
+        ####DEGUB####
+
+        params = self.C.parameters()
+        flat_params = torch.cat([p.detach().view(-1) for p in params], dim=0).cpu().numpy()
+        es = cma.CMAEvolutionStrategy(
+            flat_params, 
+            0.2, 
+            {'popsize':pop_size}
+        )
+
+        print("Starting CMA training")
+        print("Generation {}".format(generation+1))
+        start_time = time.time()
+
+        while not es.stop(): # and generation < 20:
+
+            if cur_best is not None and - cur_best > target_return:
+                print("Already better than target, breaking...")
+                break
+
+            # compute solutions
+            r_list = [0] * pop_size  # result list
+            solutions = es.ask()
+
+            if display: pbar = tqdm(total=pop_size * n_samples)
+            
+            for s_id, params in enumerate(solutions):
+                for _ in range(n_samples):
+                    r_list[s_id] += self.rollout(self, params, device=self.device) / n_samples
+                    if display: pbar.update(1)
+
+            if display: pbar.close()
+
+            es.tell(solutions, r_list)
+            es.disp()
+
+            # evaluation and saving
+            if  generation % log_step == log_step - 1: render = True
+
+            best_params, best = self.evaluate(solutions, r_list)
+            print("Current evaluation: {}".format(- best)) # -950 -900 -1050
+
+            if not cur_best or cur_best > best: # 950 900 900
+                cur_best = best
+
+                print("Saving new best with value {}...".format(-cur_best))
+                # print("NEW Plus Saving new best with value {}...".format(cur_best))
+    
+                # load parameters into controller
+                for p, p_0 in zip(self.C.parameters(), best_params):
+                    p.data.copy_(p_0)
+
+                self.savedir(self.modules_dir)
+                with open(self.modules_dir+'cur_best.bk', 'w') as f: f.write(str(-cur_best))
+                self.save()
+                self.evaluate(solutions, r_list, render=True, roll=3)
+
+            if - best > target_return: #target_return:
+                # print("cur best {}".format(- cur_best))
+                print("Terminating controller training with value {}...".format(-cur_best))
+                break
+
+            generation += 1
+            print("Generation {}".format(generation+1))
+            
+        return
 
 
-        #CMA-ES(C).train
+        
+        #param = sum(p.numel() for p in self.C.parameters())
+
+        #trainer = self.trainGA(param, self.env, self)
+        #print("train C")
+        #trainer.trainGA(10)
+
+        envVAE = gym.make('CarRacing-v2', continuous=False)#, render_mode='human')
         for _ in range(1):
             rollout = []
-            rolloutA = []
-            state, _ = self.env.reset()
+            #rolloutA = []
+            state, _ = envVAE.reset()
             for _ in range(128*60):
                 state = torch.tensor(np.array(state)).unsqueeze(0)
                 
                 state = state.to(self.device)
                 a = self.act(state)
-                observation, reward, terminated, truncated, info = self.env.step(a)
+                observation, reward, terminated, truncated, info = envVAE.step(a)
                 
                 state = torch.from_numpy(observation)
                 state = state.permute(0,2,1).permute(1,0,2)
                 rollout.append(state/255)
-                rolloutA.append(a)
-                #if (i + 1) % (32*100) == 0:
-                #    state, _ = self.env.reset()
+                #rolloutA.append(a)
+                if ((i + 1) % (128*5) == 0) or (terminated or truncated):
+                    state, _ = envVAE.reset()
             rollout = torch.stack(rollout, dim=0).to(self.device)
-           # rollout = rollout.permute(0,1,3,2).permute(0,2,1,3)
+           #rollout = rollout.permute(0,1,3,2).permute(0,2,1,3)
 
-            optimizerVAE = torch.optim.Adam(self.VAE.parameters(), lr=7.5e-5)
+        
+        optimizerVAE1 = torch.optim.Adam(self.VAE.parameters(), lr=5e-5)
+        optimizerVAE2 = torch.optim.Adam(self.VAE.parameters(), lr=1e-5)
+        optimizerVAE3 = torch.optim.Adam(self.VAE.parameters(), lr=7.5e-6)
 
-            self.trainmodule(self.VAE.to(self.device), optimizerVAE, rollout.float().to(self.device), batch_sizeVAE, num_epochsVAE, schedulerVAE)
+        if train_vae == True:
+            print("train 1")
+            self.trainmodule(self.VAE, optimizerVAE1, rollout, batch_sizeVAE, num_epochsVAE, schedulerVAE)
+            self.trainmodule(self.VAE, optimizerVAE2, rollout, batch_sizeVAE, num_epochsVAE, schedulerVAE)
+            self.trainmodule(self.VAE, optimizerVAE3, rollout, batch_sizeVAE, num_epochsVAE, schedulerVAE)
+            #save vae
 
-            mu, logvar = self.VAE.encode(rollout.float())
-            rolloutZ = self.VAE.latent(mu, logvar).detach().to(self.device)
+            samples = rollout[(np.random.rand(10)*rollout.shape[0]).astype(int)]
+            decodedSamples, _, _ = self.VAE.forward(samples.float())
+            torch.save(self.VAE, 'vae2.pt')
+            for index, obs in enumerate(samples):
+                plt.subplot(5, 4, 2*index +1)
+                obs = torch.movedim(obs, (1, 2, 0), (0, 1, 2))
+                plt.imshow(obs.cpu().numpy(), interpolation='nearest')
 
-            rolloutA = torch.tensor(np.array(rolloutA)).to(self.device).detach()
+            for index, dec in enumerate(decodedSamples):
+                plt.subplot(5, 4, 2*index +2)
+                decoded = torch.movedim(dec, (1, 2, 0), (0, 1, 2))
+                plt.imshow(decoded.cpu().detach().numpy(), interpolation="nearest")
 
-            rolloutRNN = torch.concat((rolloutA.detach(), rolloutZ.detach()), dim=1).to(self.device).detach()
+            plt.show()
+            return
+        else:
+            #load vae
+            self.VAE = torch.load('vae.pt')
+
+            rollout = None
+
+            #mu, logvar = self.VAE.encode(rollout.float())
+            #rolloutZ = self.VAE.latent(mu, logvar).detach().to(self.device)
+
+            #rolloutA = torch.tensor(np.array(rolloutA)).to(self.device).detach()
+
+            #rolloutRNN = torch.concat((rolloutA.detach(), rolloutZ.detach()), dim=1).to(self.device).detach()
 
             #rolloutH = self.MDN_RNN.forward_lstm(rolloutRNN).to(self.device)
 
-            self.trainmodule(self.MDN_RNN.to(self.device), optimizerRNN, rolloutRNN.detach().to(self.device), batch_sizeRNN, num_epochsRNN, schedulerRNN)
-
-            #MDN_RNN.train()
-
-            # Example usage
-            
-            trainer.trainGA(10)
+            #self.trainmodule(self.MDN_RNN.to(self.device), optimizerRNN, rolloutRNN.detach().to(self.device), batch_sizeRNN, num_epochsRNN, schedulerRNN)
+            trainer.trainGA(20)
 
         return
+    def savedir(self, dest):
+        if not exists(dest): mkdir(dest)
+        else: 
+            if exists(dest+self.name.lower()+'.pt'):
+                remove(dest+self.name.lower()+'.pt')
+        torch.save(self.state_dict(), dest+self.name.lower()+'.pt')
 
     def save(self):
-        torch.save(self.state_dict(), 'model.pt')
+        torch.save(self.state_dict(), 'model1.pt')
 
     def load(self):
         self.load_state_dict(torch.load('model.pt', map_location=self.device))
@@ -256,7 +469,7 @@ class Policy(nn.Module):
 
             def fitness_func(gaclass, solution, sol_idx):
                 #with env_lock:
-                    env = gym.make('CarRacing-v2', continuous=True)#, render_mode='state_pixels')
+                    env = gym.make('CarRacing-v2', continuous=False)#, render_mode='state_pixels')
                     env.reset()
                     model_weights_dict = pygad.torchga.model_weights_as_dict(model=self.model.C, weights_vector=solution)
                     self.model.C.load_state_dict(model_weights_dict)
@@ -276,16 +489,8 @@ class Policy(nn.Module):
                         if reward < 0:
                             reward = reward*2
                         sum_reward += reward 
-                    print(sum_reward)
-                    return sum_reward
-
-
-            num_generations = num_generations # Number of generations.
-            num_parents_mating = 12 # Number of solutions to be selected as parents in the mating pool.
-
-            sol_per_pop = 20 # Number of solutions in the population.
-            num_genes = self.params
-
+                    print(sum_reward*2)
+                    return sum_reward*2
             
             def on_generation(ga_instance):
                 print(f"Generation = {ga_instance.generations_completed}")
@@ -454,14 +659,6 @@ class Policy(nn.Module):
                 # Replace elements in the original list with their corresponding indicesa
                 parent_ranks = [element_to_index[round(value, 5)]+1 for value in parent_ranks]
 
-                # # Create a dictionary mapping unique elements to indices
-                # element_to_index = {value: index for index, value in enumerate(set(parent_ranks))}
-
-                # # Replace elements in the original list with their corresponding indices
-                # parent_ranks = [element_to_index[value]+1 for value in parent_ranks]
-                
-                #print("ga_instance.last_generation_fitness", ga_instance.last_generation_fitness, "element_to_index", element_to_index, "parent_ranks", parent_ranks)
-
                 while len(offspring) < offspring_size[0]:
                     # Select parents based on their ranks
                     parent1_rank = parent_ranks[idx % parents.shape[0]]
@@ -533,6 +730,12 @@ class Policy(nn.Module):
                     idx += 2
 
                 return np.array(offspring)
+            
+            num_generations = num_generations # Number of generations.
+            num_parents_mating = 4 # Number of solutions to be selected as parents in the mating pool.
+
+            sol_per_pop = 6 # Number of solutions in the population.
+            num_genes = self.params
 
             ga_instance = pygad.GA(num_generations=num_generations,
                                 num_parents_mating=num_parents_mating,
@@ -541,10 +744,10 @@ class Policy(nn.Module):
                                 fitness_func=fitness_func,
                                 on_generation=on_generation,
                                 mutation_type="adaptive",
-                                keep_elitism=4,
-                                crossover_type="scattered",
-                                parent_selection_type="rank",
-                                mutation_percent_genes = (30,5),
+                                keep_elitism=2,
+                                crossover_type=custom_crossover,
+                                parent_selection_type="rws",
+                                mutation_percent_genes = (10,2),
                                 parallel_processing=["thread", 6],
                                 
                                 )
@@ -583,7 +786,7 @@ class LearnableClippingLayer(nn.Module):
 
     def forward(self, x):
         x = self.linear(x)
-        x = self.scale * torch.tanh(x)
+        x = torch.tanh(x)
         return x
     
 
@@ -595,17 +798,9 @@ class VAE(nn.Module):
         self.device = None
         
         # encoder
-        self.batch_norm_img = nn.BatchNorm2d(3)
-        self.norm_img = nn.BatchNorm1d(3)
         self.conv1 = nn.Conv2d(in_channels=3, out_channels=16, kernel_size=3, stride=2, padding=1)
-        self.batch_norm1 = nn.BatchNorm2d(16)
-        self.norm1 = nn.BatchNorm1d(16)
         self.conv2 = nn.Conv2d(in_channels=16, out_channels=32, kernel_size=3, stride=2, padding=1)
-        self.batch_norm2 = nn.BatchNorm2d(32)
-        self.norm2 = nn.BatchNorm1d(32)
         self.conv3 = nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3, stride=2, padding=1)
-        self.batch_norm3 = nn.BatchNorm2d(64)
-        self.norm3 = nn.BatchNorm1d(64)
         self.adaptive_pool = nn.AdaptiveAvgPool2d((4, 4))
         
         # z
@@ -634,11 +829,6 @@ class VAE(nn.Module):
         self.batch_size = 1
         if len(x.shape)>3:
             self.batch_size = x.shape[0]
-        
-        # if self.batch_size >1: 
-        #     x = self.batch_norm_img(x)
-        # else:
-        #     x = self.norm_img(x)
         out = F.relu(self.conv1(x))
         # if self.batch_size >1: 
         #     out = self.batch_norm1(out)
@@ -656,13 +846,9 @@ class VAE(nn.Module):
         #     out = self.norm3(out)
         out = F.relu(self.adaptive_pool(out))
         out = out.reshape(self.batch_size,1024)
-        
-        
 
         mu = self.mu(out)
         logvar = self.logvar(out)
-        
-        #print("mu", mu, "\n logvar", logvar)
 
         return mu, logvar
         
@@ -715,6 +901,14 @@ class VAE(nn.Module):
         total_loss = recon_loss + kl_loss
 
         return total_loss
+    
+    def loss_function1(self, x, x_hat, mean, log_var):
+
+        bce_loss = nn.BCEWithLogitsLoss(reduction='sum')
+        reproduction_loss = bce_loss(x_hat, x)  
+        KLD = - 0.5 * torch.sum(1+ log_var - mean.pow(2) - log_var.exp())
+
+        return reproduction_loss + KLD
 
     def get_latent_size(self):
         
@@ -724,217 +918,68 @@ class VAE(nn.Module):
         self.device = device
 
 
-class VAE1(nn.Module):
-    """ Variational Autoencoder (specific for this task)"""
-
-    def __init__(self):
-        super().__init__()
-
-        # global variables
-        self.CHANNELS = 3
-        self.LATENT = 100
-        self.OBS_SIZE = 96
-        
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-        # encoder
-        self.encoder = nn.Sequential(
-            nn.Conv2d(self.CHANNELS, 16, kernel_size=3, stride=2),  # Convolution with stride 1
-            nn.LeakyReLU(0.2),
-            nn.AvgPool2d(kernel_size=4, stride=2),  # Average pooling to reduce dimensions
-            nn.Flatten(),
-            nn.Linear(16*22*22, 2048),  # Adjusted for new flattened size
-            nn.LeakyReLU(0.2),
-            nn.Linear(2048, 256),
-            nn.LeakyReLU(0.2)
-        )
-
-        # latent
-        self.mean_layer = nn.Linear(256, self.LATENT)
-        self.logvar_layer = nn.Linear(256, self.LATENT)
-
-        # decoder
-        self.decoder = nn.Sequential(
-            nn.Linear(self.LATENT, 256),
-            nn.LeakyReLU(0.2),
-            nn.Linear(256, 2048),
-            nn.LeakyReLU(0.2),
-            nn.Linear(2048, 16*22*22),
-            nn.LeakyReLU(0.2),
-            nn.Linear(16*22*22, 3*96*96),
-            nn.LeakyReLU(0.2),
-        )
-
-        #self.convT = nn.ConvTranspose2d(3*96*96, self.CHANNELS, 96, stride=1)
-        self.conv = nn.Conv2d(self.CHANNELS, self.CHANNELS, kernel_size=3, stride=1, padding=1)
-
-    def encode(self, x):
-        x = self.encoder(x)
-        mu = self.mean_layer(x)
-        logsigma =  self.logvar_layer(x)
-        return mu, logsigma
+# ctallec function:
+def unflatten_parameters(self, params, example, device):
+    """ Unflatten parameters. Note: example is generator of parameters (module.parameters()), used to reshape params """
     
-    def decode(self, x):
-        x = self.decoder(x)
-        batch_size = 1
-        #print(x.shape)
-        if len(x.shape)>1:
-            batch_size = x.shape[0]
-        #print(batch_size)
-        x = torch.reshape(x,(batch_size,3,96,96))
-        x = self.conv(x)
-        x =  F.sigmoid(x)
-        #print(x.shape)
-        return x
+    params = torch.Tensor(params).to(device)
+    idx = 0
+    unflattened = []
+    for e_p in example:
+        unflattened += [params[idx:idx + e_p.numel()].view(e_p.size())]
+        idx += e_p.numel()
+    return unflattened
 
-    def latent(self, mu, logsigma):
-        eps = torch.randn_like(logsigma).to(self.device)      
-        z = eps.mul(logsigma).add_(mu)
-        return z
 
-    def forward(self, x):
-        mu, logsigma = self.encode(x)
-        z = self.latent(mu, logsigma)
-        recon_x = self.decode(z)
-        return recon_x, mu, logsigma
+def evaluate(self, solutions, results, render=False, roll=6):
+    print("Evaluating...")
+    index_min = np.argmin(results)
+    best_guess = solutions[index_min]
+    restimates = []
 
-    def set_device(self, device):
-        self.device = device
+    p_list = []
+    for s_id in range(roll):
+        p_list.append((s_id, best_guess))
+
+    for _ in tqdm(range(roll)):
+        value = self.roller.rollout(self, best_guess, device=self.device, render=render)
+        restimates.append(value)
+
     
-    def save(self, dest):
-        if not exists(dest): mkdir(dest)
-        else: 
-            if exists(dest+self.name.lower()+'.pt'):
-                remove(dest+self.name.lower()+'.pt')
-        torch.save(self.state_dict(), dest+self.name.lower()+'.pt')
+    return best_guess, np.mean(restimates)
 
-    def load(self, dir): 
-        self.load_state_dict(torch.load(dir+self.name.lower()+'.pt', map_location=self.device))
+def rollout(self, agent, params=None, limit=1000, device='cpu', render=False):
+    """ Execute a rollout and returns minus cumulative reward. """
 
-    def loss_function(self, out, y, mu, logvar):
-        # Reconstruction loss
-        recon_loss = F.mse_loss(out, y, reduction='sum')
+    render_mode = 'human' if render else 'rgb_array'
+    self.env = gym.make('CarRacing-v2', continuous=False, render_mode=render_mode)
 
-        # KL divergence loss
-        kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+    if params is not None:
+        params = self.unflatten_parameters(params, agent.c.parameters(), device)
 
-        # Total loss is the sum of reconstruction loss and KL divergence loss
-        total_loss = recon_loss + kl_loss
+        # load parameters into agent controller
+        for p, p_0 in zip(agent.c.parameters(), params):
+            p.data.copy_(p_0)
 
-        return total_loss
-    ''''''
-    def loss_function1(self, out, y, mu, logvar):
-        CE = np.array([F.cross_entropy(out[0], y[0], reduction="sum").detach().cpu() ,F.cross_entropy(out[1], y[1], reduction="sum").detach().cpu(), F.cross_entropy(out[2], y[2], reduction="sum").detach().cpu()]).mean()
-        KL = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
-        return CE+KL
-    
+    # ####DEGUB####
+    # for p in agent.c.parameters():
+    #     print('new parameters: {}'.format(p))
+    #     break
+    # ####DEGUB####
 
-class MDN(nn.Module):
-    
-    def __init__(self, input_size, output_size, K, units=512):
-        super().__init__()
-        
-        self.input_size = input_size
-        self.output_size = output_size
-        self.K = K
-        
-        self.l1 = nn.Linear(input_size, 3 * K * output_size)
-        
-        self.oneDivSqrtTwoPI = 1.0 / np.sqrt(2.0*np.pi)
-        
-    def forward(self, x):
-        batch_size, seq_len = x.shape[0],x.shape[1]
+    obs, _ = self.env.reset()
+    cumulative = 0
+    done = False
 
-        out = self.l1(x)
-
-        pi, sigma, mu  = torch.split(out, (self.K * self.output_size , self.K * self.output_size, self.K * self.output_size), dim=2)
-        
-         
-        sigma = sigma.view(batch_size, seq_len, self.K, self.output_size)
-        sigma = torch.exp(sigma)
-        
-        mu = mu.view(batch_size, seq_len, self.K, self.output_size)
-
-        pi = pi.view(batch_size, seq_len, self.K, self.output_size)
-        pi = F.softmax(pi, dim=2)
-        
-        return pi, sigma, mu
-    
-    def gaussian_distribution(self, y, mu, sigma):
-        y = y.unsqueeze(2).expand_as(sigma)
-        
-        out = (y - mu) / sigma
-        out = -0.5 * (out * out)
-        out = (torch.exp(out) / sigma) * self.oneDivSqrtTwoPI
-
-        return out
-    
-    def loss(self, y, pi, mu, sigma):
-
-        out = self.gaussian_distribution(y, mu, sigma)
-        out = out * pi
-        out = torch.sum(out, dim=2)
-        
-        # kill (inf) nan loss
-        out[out <= float(1e-24)] = 1
-        
-        out = -torch.log(out)
-        out = torch.mean(out)
-        
-        return out
-
-class MDN_RNN(nn.Module):
-
-    def __init__(self, input_size, output_size, mdn_units=512, hidden_size=256, num_mixs=5):
-        super(MDN_RNN, self).__init__()
-        self.hidden_size = hidden_size
-        self.num_mixs = num_mixs
-        self.input_size = input_size
-        self.output_size = output_size
-        self.state = None
-        
-        self.lstm = nn.LSTM(input_size, hidden_size, 1, batch_first=True)
-        self.mdn = MDN(hidden_size, output_size, num_mixs, mdn_units)
-
-    def forward(self, x):
-        
-        y = None
-        x = x.unsqueeze(0) # batch first
-        
-        if self.state!=None:
-            y, state = self.lstm(x, (self.state[0].detach(), self.state[1].detach()))
-        else:
-            y, state = self.lstm(x)
-
-        #print("y",y,"state", state)
-        self.state = state
-
-        pi, sigma, mu = self.mdn(y)
-        
-        return state, sigma, mu
+    for _ in range(limit):
+        action = agent.act(obs) 
+        obs, reward, terminated, truncated, _ = self.env.step(action)
             
-    def forward_lstm(self, x, state=None):
-        
-        y = None
-        x = x.unsqueeze(0) # batch first
-        
-        if self.state!=None:
-            y, state = self.lstm(x, (self.state[0].detach(), self.state[1].detach()))
-        else:
-            y, state = self.lstm(x)
+        done = terminated 
+        if done: break
 
-        #print("y",y,"state", state)
-        self.state = state
-        
-        return y, state
-    # outputs, y_batch, mu, logvar
-    def loss_function(self, out, y, mu, logvar):
-        #BCE = F.binary_cross_entropy(out, y, reduction="sum")
-        KL = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
-        return KL
+        cumulative += reward # 50 100 -50
 
-    def get_hidden_size(self):
-        return self.hidden_size
-
-
-    
+    # print("cumulative: {}".format(cumulative))
+    cumulative += 2000 # reward "temperature"
+    return (- cumulative) # 950 900 1050
