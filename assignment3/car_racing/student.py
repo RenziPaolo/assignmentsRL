@@ -1,4 +1,3 @@
-
 import gymnasium as gym
 import torch
 import torch.nn as nn
@@ -27,21 +26,21 @@ class Policy(nn.Module):
         #TODO 
         latent_dim = 32
         hidden_size = 256
-        self.VAE = VAE(latent_size=latent_dim).to(self.device)
+        self.vae = VAE(latent_size=latent_dim).to(self.device)
 
         self.modules_dir = r'C:\Users\Paolo\Downloads\RL\checkpoint'
 
-        self.name = "Giovanni"
+        self.name = "Nuvolari"
 
         #self.MDN_RNN = MDN_RNN(input_size = latent_dim + 3, output_size=latent_dim).to(self.device)
         #self.MDN_RNN = MDRNN(latent_dim, 3, hidden_size, 10)
-        self.C = nn.Linear(in_features=latent_dim, out_features=4).to(self.device)
-        #self.C = LearnableClippingLayer(in_features=latent_dim, out_features=4).to(self.device)
+        self.c = c(in_features=latent_dim, out_features=4).to(self.device)
+        #self.c = LearnableClippingLayer(in_features=latent_dim, out_features=4).to(self.device)
 
     def forward(self, x):
         # TODO
-        z = self.VAE.encode(x)      
-        a = self.C(z, self.MDN_RNN.forward_lstm(z))
+        z = self.vae.encode(x)      
+        a = self.c(z, self.MDN_RNN.forward_lstm(z))
         a = torch.clip(a, min = -1, max = 1 )
         h = self.MDN_RNN(z, a, h)
 
@@ -61,8 +60,8 @@ class Policy(nn.Module):
             state = state.unsqueeze(0)
         if state.shape[1] == 96:
             state = state.permute(0,1,3,2).permute(0,2,1,3).to(self.device)
-        mu, logvar = self.VAE.encode(state.float())
-        z = self.VAE.latent(mu, logvar)
+        mu, logvar = self.vae.encode(state.float())
+        z = self.vae.latent(mu, logvar)
         q.get()
         q.put(z)
         l = []
@@ -71,7 +70,7 @@ class Policy(nn.Module):
         for i in range(len(l)):
             q.put(l[i])
 
-        self.a = self.C(z)
+        self.a = self.c(z)
         torch.clip(self.a, min = 0, max = 5 )
         self.a = self.a.cpu().detach()
 
@@ -105,7 +104,6 @@ class Policy(nn.Module):
         for _ in tqdm(range(num_eval)):
             value = self.rollout(self, best_guess, device=self.device, render=render)
             restimates.append(value)
-
         
         return best_guess, np.mean(restimates)
 
@@ -113,13 +111,13 @@ class Policy(nn.Module):
         """ Execute a rollout and returns minus cumulative reward. """
 
         render_mode = 'human' if render else 'rgb_array'
-        self.env = gym.make('CarRacing-v2', continuous=False, render_mode=render_mode)
+        self.env = gym.make('CarRacing-v2', continuous=self.continuous, render_mode=render_mode)
 
         if params is not None:
-            params = self.unflatten_parameters(params, agent.C.parameters(), device)
+            params = self.unflatten_parameters(params, agent.c.parameters(), device)
 
             # load parameters into agent controller
-            for p, p_0 in zip(agent.C.parameters(), params):
+            for p, p_0 in zip(agent.c.parameters(), params):
                 p.data.copy_(p_0)
 
         # ####DEGUB####
@@ -142,8 +140,8 @@ class Policy(nn.Module):
             cumulative += reward # 50 100 -50
 
         # print("cumulative: {}".format(cumulative))
-        cumulative += 1000 # reward "temperature"
-        return (- cumulative) # 950 900 1050
+        # reward "temperature"
+        return (1000 - cumulative) # 950 900 1050
 
     def train(self):
         # TODO
@@ -155,9 +153,9 @@ class Policy(nn.Module):
         #rolloutA = []
         rolloutR = []
         num_rolloutVAE = 128*120
-        envVAE = gym.make('CarRacing-v2', continuous=False)#, render_mode='human')
+        envVAE = gym.make('CarRacing-v2', continuous=self.continuous)#, render_mode='human')
         envVAE.reset()
-        train_vae = True
+        train_vae = False
         if train_vae == False:
             num_rolloutVAE = 1
 
@@ -177,28 +175,30 @@ class Policy(nn.Module):
         rolloutVAE = torch.stack(rolloutVAE, dim=0).float().to(self.device)
         
 
-        optimizerVAE1 = torch.optim.Adam(self.VAE.parameters(), lr=2e-3)
-        optimizerVAE2 = torch.optim.Adam(self.VAE.parameters(), lr=1e-4)
-        optimizerVAE3 = torch.optim.Adam(self.VAE.parameters(), lr=3e-5)
-        optimizerVAE4 = torch.optim.Adam(self.VAE.parameters(), lr=1e-6)
+        optimizerVAE1 = torch.optim.Adam(self.vae.parameters(), lr=1e-3)
+        optimizerVAE2 = torch.optim.Adam(self.vae.parameters(), lr=7.5e-4)
+        optimizerVAE3 = torch.optim.Adam(self.vae.parameters(), lr=5e-6)
+        optimizerVAE4 = torch.optim.Adam(self.vae.parameters(), lr=1e-7)
+        optimizerVAE4 = torch.optim.Adam(self.vae.parameters(), lr=1e-8)
         schedulerVAE = torch.optim.lr_scheduler.StepLR(optimizerVAE1, step_size=10, gamma=0.8)   
         batch_sizeVAE = 128
         num_epochsVAE = 100
-        #self.VAE = torch.load('vae2.pt')
+        #self.vae = torch.load('vae2.pt')
         if train_vae == True:
             print("train 1")
-            self.trainmodule(self.VAE, optimizerVAE1, rolloutVAE, batch_sizeVAE, 75, schedulerVAE)
-            self.trainmodule(self.VAE, optimizerVAE2, rolloutVAE, batch_sizeVAE, 150, schedulerVAE)
-            self.trainmodule(self.VAE, optimizerVAE3, rolloutVAE, batch_sizeVAE, 225, schedulerVAE)
-            self.trainmodule(self.VAE, optimizerVAE4, rolloutVAE, batch_sizeVAE, 500, schedulerVAE)
+            self.trainmodule(self.vae, optimizerVAE1, rolloutVAE, batch_sizeVAE, 70, schedulerVAE)
+            self.trainmodule(self.vae, optimizerVAE2, rolloutVAE, batch_sizeVAE, 100, schedulerVAE)
+            self.trainmodule(self.vae, optimizerVAE3, rolloutVAE, batch_sizeVAE, 100, schedulerVAE)
+            self.trainmodule(self.vae, optimizerVAE4, rolloutVAE, batch_sizeVAE, 100, schedulerVAE)
+            self.trainmodule(self.vae, optimizerVAE4, rolloutVAE, batch_sizeVAE, 100, schedulerVAE)
             #save vae
 
 
            
         
             samples = rolloutVAE[(np.random.rand(10)*rolloutVAE.shape[0]).astype(int)]
-            decodedSamples, _, _ = self.VAE.forward(samples.float())
-            torch.save(self.VAE, 'vae1.pt')
+            decodedSamples, _, _ = self.vae.forward(samples.float())
+            torch.save(self.vae, 'vae.pt')
             for index, obs in enumerate(samples):
                 plt.subplot(5, 4, 2*index +1)
                 obs = torch.movedim(obs, (1, 2, 0), (0, 1, 2))
@@ -212,19 +212,13 @@ class Policy(nn.Module):
             plt.show()
             return
         else:
-            #load vae
-            self.VAE = torch.load('vae.pt')
+            #load vae 
+            self.vae = torch.load('vae.pt').to(self.device)
 
-        #self.trainmodule(self.VAE, optimizerVAE, rollout, batch_sizeVAE, num_epochsVAE, schedulerVAE)
+        #self.trainmodule(self.vae, optimizerVAE, rollout, batch_sizeVAE, num_epochsVAE, schedulerVAE)
 
-
-
-
-
-
-
-        #mu, logvar = self.VAE.encode(rollout.float())
-        #rolloutZ = self.VAE.latent(mu, logvar).detach().to(self.device)
+        #mu, logvar = self.vae.encode(rollout.float())
+        #rolloutZ = self.vae.latent(mu, logvar).detach().to(self.device)
 
         #rolloutA = torch.tensor(np.array(rolloutA)).to(self.device).detach()
 
@@ -239,10 +233,10 @@ class Policy(nn.Module):
 
         #self.trainmodule(self.MDN_RNN.to(self.device), optimizerRNN, rolloutRNN.detach().to(self.device), batch_sizeRNN, num_epochsRNN, schedulerRNN)
 
-                ###DEGUB####
-        for p in self.C.parameters():
-            print('previous parameters: {}'.format(p))
-            break
+        ###DEGUB####
+        # for p in self.c.parameters():
+        #     print('previous parameters: {}'.format(p))
+        #     break
         ###DEGUB####
 
         # training parameters
@@ -264,16 +258,16 @@ class Policy(nn.Module):
             # state = torch.load(c_checkpoint, map_location=self.device)
             with open(self.modules_dir+'cur_best.bk', 'r') as f : 
                 for i in f : cur_best = float(i)
-            self.C = self.C.load(self.modules_dir)
+            self.c = self.c.load(self.modules_dir)
             print("Previous best was {}...".format(-cur_best))
 
         ####DEGUB####
-        for p in self.C.parameters():
+        for p in self.c.parameters():
             print('previous parameters: {}'.format(p))
             break
         ####DEGUB####
 
-        params = self.C.parameters()
+        params = self.c.parameters()
         flat_params = torch.cat([p.detach().view(-1) for p in params], dim=0).cpu().numpy()
         es = cma.CMAEvolutionStrategy(
             flat_params, 
@@ -309,28 +303,27 @@ class Policy(nn.Module):
 
             # evaluation and saving
             if  generation % log_step == log_step - 1: render = True
-
             best_params, best = self.evaluate(solutions, r_list)
-            print("Current evaluation: {}".format(- best)) # -950 -900 -1050
+            print("Current evaluation: {}".format(best)) # -950 -900 -1050
 
             if not cur_best or cur_best > best: # 950 900 900
                 cur_best = best
 
-                print("Saving new best with value {}...".format(-cur_best))
+                print("Saving new best with value {}...".format(cur_best))
                 # print("NEW Plus Saving new best with value {}...".format(cur_best))
     
                 # load parameters into controller
-                for p, p_0 in zip(self.C.parameters(), best_params):
+                unflat_best_params = self.unflatten_parameters(best_params, self.c.parameters(), self.device)
+                for p, p_0 in zip(self.c.parameters(), unflat_best_params):
                     p.data.copy_(p_0)
-
                 self.savedir(self.modules_dir)
-                with open(self.modules_dir+'cur_best.bk', 'w') as f: f.write(str(-cur_best))
+                with open(self.modules_dir+'cur_best.bk', 'w') as f: f.write(str(cur_best))
                 self.save()
-                self.evaluate(solutions, r_list, render=True, roll=3)
+                self.evaluate(solutions, r_list, render=True, num_eval=3)
 
             if - best > target_return: #target_return:
                 # print("cur best {}".format(- cur_best))
-                print("Terminating controller training with value {}...".format(-cur_best))
+                print("Terminating controller training with value {}...".format(cur_best))
                 break
 
             generation += 1
@@ -340,13 +333,13 @@ class Policy(nn.Module):
 
 
         
-        #param = sum(p.numel() for p in self.C.parameters())
+        #param = sum(p.numel() for p in self.c.parameters())
 
         #trainer = self.trainGA(param, self.env, self)
         #print("train C")
         #trainer.trainGA(10)
 
-        envVAE = gym.make('CarRacing-v2', continuous=False)#, render_mode='human')
+        envVAE = gym.make('CarRacing-v2', continuous=self.continuous)#, render_mode='human')
         for _ in range(1):
             rollout = []
             #rolloutA = []
@@ -368,20 +361,20 @@ class Policy(nn.Module):
            #rollout = rollout.permute(0,1,3,2).permute(0,2,1,3)
 
         
-        optimizerVAE1 = torch.optim.Adam(self.VAE.parameters(), lr=5e-5)
-        optimizerVAE2 = torch.optim.Adam(self.VAE.parameters(), lr=1e-5)
-        optimizerVAE3 = torch.optim.Adam(self.VAE.parameters(), lr=7.5e-6)
+        optimizerVAE1 = torch.optim.Adam(self.vae.parameters(), lr=5e-5)
+        optimizerVAE2 = torch.optim.Adam(self.vae.parameters(), lr=1e-5)
+        optimizerVAE3 = torch.optim.Adam(self.vae.parameters(), lr=7.5e-6)
 
         if train_vae == True:
             print("train 1")
-            self.trainmodule(self.VAE, optimizerVAE1, rollout, batch_sizeVAE, num_epochsVAE, schedulerVAE)
-            self.trainmodule(self.VAE, optimizerVAE2, rollout, batch_sizeVAE, num_epochsVAE, schedulerVAE)
-            self.trainmodule(self.VAE, optimizerVAE3, rollout, batch_sizeVAE, num_epochsVAE, schedulerVAE)
+            self.trainmodule(self.vae, optimizerVAE1, rollout, batch_sizeVAE, num_epochsVAE, schedulerVAE)
+            self.trainmodule(self.vae, optimizerVAE2, rollout, batch_sizeVAE, num_epochsVAE, schedulerVAE)
+            self.trainmodule(self.vae, optimizerVAE3, rollout, batch_sizeVAE, num_epochsVAE, schedulerVAE)
             #save vae
 
             samples = rollout[(np.random.rand(10)*rollout.shape[0]).astype(int)]
-            decodedSamples, _, _ = self.VAE.forward(samples.float())
-            torch.save(self.VAE, 'vae2.pt')
+            decodedSamples, _, _ = self.vae.forward(samples.float())
+            torch.save(self.vae, 'vae2.pt')
             for index, obs in enumerate(samples):
                 plt.subplot(5, 4, 2*index +1)
                 obs = torch.movedim(obs, (1, 2, 0), (0, 1, 2))
@@ -396,12 +389,12 @@ class Policy(nn.Module):
             return
         else:
             #load vae
-            self.VAE = torch.load('vae.pt')
+            self.vae = torch.load('vae.pt')
 
             rollout = None
 
-            #mu, logvar = self.VAE.encode(rollout.float())
-            #rolloutZ = self.VAE.latent(mu, logvar).detach().to(self.device)
+            #mu, logvar = self.vae.encode(rollout.float())
+            #rolloutZ = self.vae.latent(mu, logvar).detach().to(self.device)
 
             #rolloutA = torch.tensor(np.array(rolloutA)).to(self.device).detach()
 
@@ -421,10 +414,10 @@ class Policy(nn.Module):
         torch.save(self.state_dict(), dest+self.name.lower()+'.pt')
 
     def save(self):
-        torch.save(self.state_dict(), 'model1.pt')
+        torch.save(self.state_dict(), 'model3.pt')
 
     def load(self):
-        self.load_state_dict(torch.load('model.pt', map_location=self.device))
+        self.load_state_dict(torch.load('model1316.pt', map_location=self.device))
 
     def to(self, device):
         ret = super().to(device)
@@ -778,16 +771,24 @@ class Policy(nn.Module):
             #loaded_ga_instance = pygad.load(filename=filename)
             #loaded_ga_instance.plot_fitness()
 
-class LearnableClippingLayer(nn.Module):
+class c(nn.Module):
     def __init__(self, in_features, out_features):
-        super(LearnableClippingLayer, self).__init__()
-        self.linear = nn.Linear(in_features, out_features)
-        self.scale = nn.Parameter(torch.Tensor([1.0, -1.0, -1.0]))
+        super(c, self).__init__()
+        self.fc = nn.Linear(in_features, out_features)
+        
 
     def forward(self, x):
-        x = self.linear(x)
-        x = torch.tanh(x)
+        x = self.fc(x)
+        #x = torch.sigmoid(x)
         return x
+    
+class c1(nn.Module):
+    def __init__(self, in_features, out_features):
+        super(c1, self).__init__()
+        self.fc = nn.Linear(in_features, out_features)
+
+    def forward(self, x):
+        return self.fc(x)
     
 
 class VAE(nn.Module):
@@ -830,20 +831,8 @@ class VAE(nn.Module):
         if len(x.shape)>3:
             self.batch_size = x.shape[0]
         out = F.relu(self.conv1(x))
-        # if self.batch_size >1: 
-        #     out = self.batch_norm1(out)
-        # else:
-        #     out = self.norm1(out)
         out = F.relu(self.conv2(out))
-        # if self.batch_size >1: 
-        #     out = self.batch_norm2(out)
-        # else:
-        #     out = self.norm2(out)
         out = F.relu(self.conv3(out))
-        # if self.batch_size >1: 
-        #     out = self.batch_norm3(out)
-        # else:
-        #     out = self.norm3(out)
         out = F.relu(self.adaptive_pool(out))
         out = out.reshape(self.batch_size,1024)
 
@@ -853,19 +842,12 @@ class VAE(nn.Module):
         return mu, logvar
         
     def decode(self, z):
-        #batch_size = z.shape[0]
-        #print("z",z)
-        #print(z.shape)
         out = self.fc(z)
         out = out.view(self.batch_size, 256, 6, 6)
-        # out = out.view(-1, 64, 4, 4)  # Reshape to 4x4x64 tensor
-        #print("out",out)
-        # out = z.view(batch_size, self.latent_size, 1, 1)
-        #print(out.shape)
 
         out = F.relu(self.dec_conv1(out))
         out = F.relu(self.dec_conv2(out))
-        out = torch.sigmoid(self.dec_conv3(out))
+        out = F.relu(self.dec_conv3(out))
         out = torch.sigmoid(self.dec_conv4(out))
         
         return out
@@ -916,70 +898,3 @@ class VAE(nn.Module):
 
     def set_device(self, device):
         self.device = device
-
-
-# ctallec function:
-def unflatten_parameters(self, params, example, device):
-    """ Unflatten parameters. Note: example is generator of parameters (module.parameters()), used to reshape params """
-    
-    params = torch.Tensor(params).to(device)
-    idx = 0
-    unflattened = []
-    for e_p in example:
-        unflattened += [params[idx:idx + e_p.numel()].view(e_p.size())]
-        idx += e_p.numel()
-    return unflattened
-
-
-def evaluate(self, solutions, results, render=False, roll=6):
-    print("Evaluating...")
-    index_min = np.argmin(results)
-    best_guess = solutions[index_min]
-    restimates = []
-
-    p_list = []
-    for s_id in range(roll):
-        p_list.append((s_id, best_guess))
-
-    for _ in tqdm(range(roll)):
-        value = self.roller.rollout(self, best_guess, device=self.device, render=render)
-        restimates.append(value)
-
-    
-    return best_guess, np.mean(restimates)
-
-def rollout(self, agent, params=None, limit=1000, device='cpu', render=False):
-    """ Execute a rollout and returns minus cumulative reward. """
-
-    render_mode = 'human' if render else 'rgb_array'
-    self.env = gym.make('CarRacing-v2', continuous=False, render_mode=render_mode)
-
-    if params is not None:
-        params = self.unflatten_parameters(params, agent.c.parameters(), device)
-
-        # load parameters into agent controller
-        for p, p_0 in zip(agent.c.parameters(), params):
-            p.data.copy_(p_0)
-
-    # ####DEGUB####
-    # for p in agent.c.parameters():
-    #     print('new parameters: {}'.format(p))
-    #     break
-    # ####DEGUB####
-
-    obs, _ = self.env.reset()
-    cumulative = 0
-    done = False
-
-    for _ in range(limit):
-        action = agent.act(obs) 
-        obs, reward, terminated, truncated, _ = self.env.step(action)
-            
-        done = terminated 
-        if done: break
-
-        cumulative += reward # 50 100 -50
-
-    # print("cumulative: {}".format(cumulative))
-    cumulative += 2000 # reward "temperature"
-    return (- cumulative) # 950 900 1050
